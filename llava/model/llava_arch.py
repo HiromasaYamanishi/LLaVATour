@@ -18,11 +18,10 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-from .multimodal_encoder.builder import build_vision_tower
-from .multimodal_projector.builder import build_vision_projector
-
-from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-
+from .multimodal_encoder.builder import build_vision_tower, build_geo_tower
+from .multimodal_projector.builder import build_vision_projector, DownSampler
+from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, USER_TOKEN_INDEX, POI_TOKEN_INDEX
 from llava.mm_utils import get_anyres_image_grid_shape
 
 
@@ -30,11 +29,11 @@ class LlavaMetaModel:
 
     def __init__(self, config):
         super(LlavaMetaModel, self).__init__(config)
-
+        print('config', config)
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = build_vision_projector(config)
-
+                
             if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
                 self.image_newline = nn.Parameter(
                     torch.empty(config.hidden_size, dtype=self.dtype)
@@ -45,7 +44,7 @@ class LlavaMetaModel:
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
-
+    
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
         mm_vision_select_layer = model_args.mm_vision_select_layer
@@ -75,6 +74,7 @@ class LlavaMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
+        self.config.down_sample = model_args.down_sample
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
@@ -88,6 +88,9 @@ class LlavaMetaModel:
             # In case it is frozen by LoRA
             for p in self.mm_projector.parameters():
                 p.requires_grad = True
+                
+        if self.config.down_sample:
+            self.down_sampler = DownSampler(self.config.hidden_size, (8, 8))
 
         if pretrain_mm_mlp_adapter is not None:
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
@@ -96,6 +99,19 @@ class LlavaMetaModel:
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
+class LlavaGeoMetaModel(LlavaMetaModel):
+    def __init__(self, config):
+        super().__init__(config)
+        #self.initialize_geo_modules()
+        
+    def get_geo_tower(self):
+        geo_tower = getattr(self, 'geo_tower', None)
+        return geo_tower
+    
+    def initialize_geo_modules(self, model_args, coordinates):
+        geo_modules = build_geo_tower(model_args, coordinates)
+        self.geo_tower = geo_modules
+        
 
 def unpad_image(tensor, original_size):
     """
@@ -140,20 +156,17 @@ class LlavaMetaForCausalLM(ABC):
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
         image_features = self.get_model().mm_projector(image_features)
+        if self.config.down_sample:
+            image_features = self.get_model().down_sampler(image_features)
         return image_features
-
-    def prepare_inputs_labels_for_multimodal(
-        self, input_ids, position_ids, attention_mask, past_key_values, labels,
-        images, image_sizes=None
-    ):
-        vision_tower = self.get_vision_tower()
-        if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels
-
+    
+    def encode_and_process_images(self, images, image_sizes):
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
+            #print('images', [i.shape for i in images])
             concat_images = torch.cat([image for image in images], dim=0)
+            #print('concat images', concat_images.shape)
             image_features = self.encode_images(concat_images)
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
@@ -200,11 +213,28 @@ class LlavaMetaForCausalLM(ABC):
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
             image_features = self.encode_images(images)
+            
+        return image_features  
+    
+        
+    def prepare_inputs_labels_for_multimodal(
+        self, input_ids, position_ids, attention_mask, past_key_values, labels,
+        images, image_sizes=None
+    ):
+        vision_tower = self.get_vision_tower()
+        if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
+        # images: [4, 3, 336, 336]
+        #print('len images', len(images))
+        batch_size = len(images)
+        #image_features = torch.zeros(batch_size, 576, 5120).to(images.device)
+        image_features = self.encode_and_process_images(images, image_sizes)
+        # [batch_size, 576(24x24?), 5120]
+        #print('image feature', len(image_features))
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
             raise NotImplementedError
-
         # Let's just add dummy tensors if they do not exist,
         # it is a headache to deal with None all the time.
         # But it is not ideal, and if you have a better idea,
@@ -223,6 +253,8 @@ class LlavaMetaForCausalLM(ABC):
 
         # remove the padding using attention_mask -- FIXME
         _input_ids = input_ids
+        # attention_mask: おそらくtransformersのデフォルトでトークンがあるものだけにattention_maskがTrueになるよう設定されている
+
         input_ids = [cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)]
         labels = [cur_labels[cur_attention_mask] for cur_labels, cur_attention_mask in zip(labels, attention_mask)]
 
@@ -230,8 +262,12 @@ class LlavaMetaForCausalLM(ABC):
         new_labels = []
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
-            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum() #IMAGE_TOKEN_INDEX=-200
+            
+            #print('num_images', num_images, len(image_features))
             if num_images == 0:
+                #print(len(image_features), cur_image_idx)
+                if cur_image_idx>=len(image_features):cur_image_idx=len(image_features)-1
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
@@ -239,11 +275,13 @@ class LlavaMetaForCausalLM(ABC):
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
                 continue
-
+            
+            # image_token_indices: 最初, IMAGE_TOKENのある場所, 最後
             image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
             cur_input_ids_noim = []
             cur_labels = labels[batch_idx]
             cur_labels_noim = []
+            # cur_input_ids_noim, cur_labels_noim: image tokenを除いたids, labels
             for i in range(len(image_token_indices) - 1):
                 cur_input_ids_noim.append(cur_input_ids[image_token_indices[i]+1:image_token_indices[i+1]])
                 cur_labels_noim.append(cur_labels[image_token_indices[i]+1:image_token_indices[i+1]])
@@ -253,25 +291,28 @@ class LlavaMetaForCausalLM(ABC):
             cur_new_input_embeds = []
             cur_new_labels = []
 
+            # <image>トークンがあるところに576x5120のimage_featureを挟んでいる
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
-                    cur_image_features = image_features[cur_image_idx]
+                    if cur_image_idx>=len(image_features):cur_image_idx=len(image_features)-1
+                    cur_image_features = image_features[cur_image_idx] #[576, 5120]
+                    #print(cur_image_features.shape)
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-
+                    #print(cur_image_idx)
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
 
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
-
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
+        #print('tokenizer_model_max_length', tokenizer_model_max_length)
         if tokenizer_model_max_length is not None:
             new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
             new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
@@ -284,7 +325,7 @@ class LlavaMetaForCausalLM(ABC):
         new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
-
+        #print('new input emb0', new_input_embeds, new_input_embeds[0].shape)
         for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
             cur_len = cur_new_embed.shape[0]
             if getattr(self.config, 'tokenizer_padding_side', 'right') == "left":
@@ -307,7 +348,7 @@ class LlavaMetaForCausalLM(ABC):
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
-
+        #print(len(image_features), len(new_input_embeds))
         if _labels is None:
             new_labels = None
         else:
@@ -320,6 +361,11 @@ class LlavaMetaForCausalLM(ABC):
 
         if _position_ids is None:
             position_ids = None
+        # print('post position_ids',position_ids, )
+        # print('post attention mask', attention_mask, attention_mask.shape)
+        # print('post key_values', past_key_values,)
+        #print('new_input_embeds', new_input_embeds, new_input_embeds.shape)
+        #print('new labels', new_labels, new_labels.shape)
 
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
 
@@ -366,3 +412,262 @@ class LlavaMetaForCausalLM(ABC):
                     p.requires_grad = False
                 for p in self.get_output_embeddings().parameters():
                     p.requires_grad = False
+
+class LlavaGeoMetaForCausalLM(LlavaMetaForCausalLM):
+    def encode_geos(self, geo_ids):
+        return self.get_model().get_geo_tower()(geo_ids)
+        
+    def prepare_inputs_labels_for_multimodal(
+        self, input_ids, position_ids, attention_mask, past_key_values, labels,
+        images, aspect_labels, geoent_labels, review_labels, image_sizes=None
+    ):        
+        #print('prepare inputs')
+        #print('input_ids', input_ids.shape)
+        #print('aspect_labels', aspect_labels.shape)
+        #print('geoent_labels', geoent_labels.shape)
+        #print('review_labels', review_labels.shape)
+        #print(input_ids, position_ids, attention_mask, past_key_values, labels,
+        #images, aspect_labels,)
+        #print('llavageometa', input_ids)
+        vision_tower = self.get_vision_tower()
+        if vision_tower is None or (images is None and len(input_ids[input_ids<POI_TOKEN_INDEX])==0) or input_ids.shape[1] == 1:
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None
+
+        # images: [4, 3, 336, 336]
+        if images is not None:
+            image_features = self.encode_and_process_images(images, image_sizes)
+        # [batch_size, 576(24x24?), 5120]
+
+        # TODO: image start / end is not implemented here to support pretraining.
+        if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
+            raise NotImplementedError
+        #print('init prepare aspect init', aspect_labels.max(), aspect_labels.min())
+        # Let's just add dummy tensors if they do not exist,
+        # it is a headache to deal with None all the time.
+        # But it is not ideal, and if you have a better idea,
+        # please open an issue / submit a PR, thanks.
+
+        _labels = labels
+        _aspect_labels = aspect_labels
+        _geoent_labels = geoent_labels
+        _review_labels = review_labels
+        _position_ids = position_ids
+        _attention_mask = attention_mask
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        else:
+            attention_mask = attention_mask.bool()
+        if position_ids is None:
+            position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+        if labels is None:
+            labels = torch.full_like(input_ids, IGNORE_INDEX)
+
+        # remove the padding using attention_mask -- FIXME
+        _input_ids = input_ids
+        # attention_mask: おそらくtransformersのデフォルトでトークンがあるものだけにattention_maskがTrueになるよう設定されている
+        # paddingした部分を除く実トークンの部分のみ
+        #print('labels', labels)
+        #print('attention_mask', attention_mask)
+        #print('input_ids, mask', input_ids, attention_mask)
+        input_ids = [cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)]
+        labels = [cur_labels[cur_attention_mask] for cur_labels, cur_attention_mask in zip(labels, attention_mask)]
+        if aspect_labels is not None:
+            aspect_labels = [cur_aspect_labels[cur_attention_mask] for cur_aspect_labels, cur_attention_mask in zip(aspect_labels, attention_mask)]
+        if geoent_labels is not None:
+            geoent_labels = [cur_geoent_labels[cur_attention_mask] for cur_geoent_labels, cur_attention_mask in zip(geoent_labels, attention_mask)]
+        if review_labels is not None:
+            review_labels = [cur_review_labels[cur_attention_mask] for cur_review_labels, cur_attention_mask in zip(review_labels, attention_mask)]
+        #print('aspect labels', aspect_labels)
+        new_input_embeds = []
+        new_labels = []
+        if aspect_labels is not None:
+            new_aspect_labels = []
+        if geoent_labels is not None:
+            new_geoent_labels = []
+        if review_labels is not None:
+            new_review_labels = []
+        cur_image_idx, cur_geo_idx = 0, 0
+        geo_ids = torch.cat([i[i<=POI_TOKEN_INDEX] for i in input_ids])
+        geo_ids = -geo_ids+POI_TOKEN_INDEX
+        geo_features = self.encode_geos(geo_ids)
+        for batch_idx, cur_input_ids in enumerate(input_ids):
+            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum() #IMAGE_TOKEN_INDEX=-200
+            num_special_tokens = (torch.logical_or(cur_input_ids == IMAGE_TOKEN_INDEX, cur_input_ids <= POI_TOKEN_INDEX)).sum()
+            special_token_indices = torch.where(torch.logical_or(cur_input_ids == IMAGE_TOKEN_INDEX, cur_input_ids <= POI_TOKEN_INDEX))[0].tolist()
+            # 画像が0枚の時は文章のみエンコードする
+            # image_token_indices: 最初, IMAGE_TOKENのある場所, 最後
+            image_token_indices = [-1] + special_token_indices + [cur_input_ids.shape[0]]
+            cur_input_ids_noim = []
+            cur_labels = labels[batch_idx]
+            cur_labels_noim = []
+            if aspect_labels is not None:
+                cur_aspect_labels = aspect_labels[batch_idx]
+                cur_aspect_labels_noim = []
+            if geoent_labels is not None:
+                cur_geoent_labels = geoent_labels[batch_idx]
+                cur_geoent_labels_noim = []
+            if review_labels is not None:
+                cur_review_labels = review_labels[batch_idx]
+                cur_review_labels_noim = []
+            # cur_input_ids_noim, cur_labels_noim: image tokenを除いたids, labels
+            for i in range(len(image_token_indices) - 1):
+                cur_input_ids_noim.append(cur_input_ids[image_token_indices[i]+1:image_token_indices[i+1]])
+                cur_labels_noim.append(cur_labels[image_token_indices[i]+1:image_token_indices[i+1]])
+                if aspect_labels is not None:
+                    cur_aspect_labels_noim.append(cur_aspect_labels[image_token_indices[i]+1:image_token_indices[i+1]])
+                if geoent_labels is not None:
+                    cur_geoent_labels_noim.append(cur_geoent_labels[image_token_indices[i]+1:image_token_indices[i+1]])
+                if review_labels is not None:
+                    cur_review_labels_noim.append(cur_review_labels[image_token_indices[i]+1:image_token_indices[i+1]])            
+            split_sizes = [x.shape[0] for x in cur_labels_noim]
+            
+            if num_special_tokens == 0:
+                cur_image_features = image_features[cur_image_idx]
+                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
+                new_input_embeds.append(cur_input_embeds)
+                new_labels.append(labels[batch_idx])
+                if aspect_labels is not None:
+                    new_aspect_labels.append(aspect_labels[batch_idx])
+                if geoent_labels is not None:
+                    new_geoent_labels.append(geoent_labels[batch_idx])
+                if review_labels is not None:
+                    new_review_labels.append(review_labels[batch_idx])
+                cur_image_idx += 1
+                continue
+            # <image>トークン以外のラベルをencodeしている
+            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
+            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            cur_new_input_embeds = []
+            cur_new_labels = []
+            if aspect_labels is not None:
+                cur_new_aspect_labels = []
+            if geoent_labels is not None:
+                cur_new_geoent_labels = []
+            if review_labels is not None:
+                cur_new_review_labels = []
+            # <image>トークンがあるところに576x5120のimage_featureを挟んでいる
+            for i in range(len(special_token_indices) + 1):
+                #print('special token indice',special_token_indices, cur_input_ids[special_token_indices[i]])
+                cur_new_input_embeds.append(cur_input_embeds_no_im[i])
+                cur_new_labels.append(cur_labels_noim[i])
+                if aspect_labels is not None:cur_new_aspect_labels.append(cur_aspect_labels_noim[i])
+                if geoent_labels is not None:cur_new_geoent_labels.append(cur_geoent_labels_noim[i])
+                if review_labels is not None:cur_new_review_labels.append(cur_review_labels_noim[i])
+                if i < len(special_token_indices) and cur_input_ids[special_token_indices[i]] == IMAGE_TOKEN_INDEX:
+                    cur_image_features = image_features[cur_image_idx] #[576, 5120]
+                    cur_image_idx += 1
+                    cur_new_input_embeds.append(cur_image_features)
+                    # imageは質問文中にあるのでIGNORE_INDEXで置き換える
+                    cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    if aspect_labels is not None:cur_new_aspect_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    if geoent_labels is not None:cur_new_geoent_labels.append(torch.full((cur_image_features.shape[0],), 0, device=cur_labels.device, dtype=cur_labels.dtype))
+                    if review_labels is not None:cur_new_review_labels.append(torch.full((cur_image_features.shape[0],), 0, device=cur_labels.device, dtype=cur_labels.dtype))
+                elif i<len(special_token_indices) and cur_input_ids[special_token_indices[i]] <= POI_TOKEN_INDEX:
+                    device = cur_input_ids.device
+                    cur_geo_features = geo_features[cur_geo_idx].unsqueeze(0)
+                    cur_new_input_embeds.append(cur_geo_features)
+                    cur_new_labels.append(torch.full((cur_geo_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    if aspect_labels is not None:cur_new_aspect_labels.append(torch.full((cur_geo_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    if geoent_labels is not None:cur_new_geoent_labels.append(torch.full((cur_geo_features.shape[0],), cur_input_ids[special_token_indices[i]], device=cur_labels.device, dtype=cur_labels.dtype))
+                    if review_labels is not None:cur_new_review_labels.append(torch.full((cur_geo_features.shape[0],), 0, device=cur_labels.device, dtype=cur_labels.dtype))
+                    cur_geo_idx += 1
+            cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
+            #print('cur_image_idx', cur_image_idx, 'cur_geo_idx', cur_geo_idx)
+            cur_new_input_embeds = torch.cat(cur_new_input_embeds)
+            cur_new_labels = torch.cat(cur_new_labels)
+            if aspect_labels is not None:
+                cur_new_aspect_labels = torch.cat(cur_new_aspect_labels)
+            if geoent_labels is not None:
+                cur_new_geoent_labels = torch.cat(cur_new_geoent_labels)
+            if review_labels is not None:
+                cur_new_review_labels = torch.cat(cur_new_review_labels)
+            new_input_embeds.append(cur_new_input_embeds)
+            new_labels.append(cur_new_labels)
+            if aspect_labels is not None:
+                new_aspect_labels.append(cur_new_aspect_labels)
+            if geoent_labels is not None:
+                new_geoent_labels.append(cur_new_geoent_labels)
+            if review_labels is not None:
+                new_review_labels.append(cur_new_review_labels)
+        #print('new aspect', new_aspect_labels)
+        # Truncate sequences to max length as image embeddings can make the sequence longer
+        tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
+        #print('tokenizer_model_max_length', tokenizer_model_max_length)
+        if tokenizer_model_max_length is not None:
+            new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
+            new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
+            if aspect_labels is not None:new_aspect_labels = [x[:tokenizer_model_max_length] for x in new_aspect_labels]
+            if geoent_labels is not None:new_geoent_labels = [x[:tokenizer_model_max_length] for x in new_geoent_labels]
+            if review_labels is not None:new_review_labels = [x[:tokenizer_model_max_length] for x in new_review_labels]
+        # Combine them
+        max_len = max(x.shape[0] for x in new_input_embeds)
+        batch_size = len(new_input_embeds)
+
+        new_input_embeds_padded = []
+        new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
+        if aspect_labels is not None:new_aspect_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_aspect_labels[0].dtype, device=new_aspect_labels[0].device)
+        if geoent_labels is not None:new_geoent_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_geoent_labels[0].dtype, device=new_geoent_labels[0].device)
+        if review_labels is not None:new_review_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_review_labels[0].dtype, device=new_review_labels[0].device)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
+        position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
+
+        for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
+            cur_len = cur_new_embed.shape[0]
+            if getattr(self.config, 'tokenizer_padding_side', 'right') == "left":
+                new_input_embeds_padded.append(torch.cat((
+                    torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device),
+                    cur_new_embed
+                ), dim=0))
+                if cur_len > 0:
+                    new_labels_padded[i, -cur_len:] = cur_new_labels
+                    if aspect_labels is not None:new_aspect_labels_padded[i, -cur_len:] = new_aspect_labels[i]
+                    if geoent_labels is not None:new_geoent_labels_padded[i, -cur_len:] = new_geoent_labels[i]
+                    if review_labels is not None:new_review_labels_padded[i, -cur_len:] = new_review_labels[i]
+                    attention_mask[i, -cur_len:] = True
+                    position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+            else:
+                new_input_embeds_padded.append(torch.cat((
+                    cur_new_embed,
+                    torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)
+                ), dim=0))
+                if cur_len > 0:
+                    new_labels_padded[i, :cur_len] = cur_new_labels
+                    if aspect_labels is not None:new_aspect_labels_padded[i, :cur_len] = new_aspect_labels[i]
+                    if geoent_labels is not None:new_geoent_labels_padded[i, :cur_len] = new_geoent_labels[i]
+                    if review_labels is not None:new_review_labels_padded[i, :cur_len] = new_review_labels[i]
+                    attention_mask[i, :cur_len] = True
+                    position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+        #print('new aspect pad', new_aspect_labels_padded)
+        new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
+        if _labels is None:
+            new_labels = None
+        else:
+            new_labels = new_labels_padded
+        if _aspect_labels is None:
+            new_aspect_labels = None
+        else:
+            new_aspect_labels = new_aspect_labels_padded
+        if _geoent_labels is None:
+            new_geoent_labels = None
+        else:
+            new_geoent_labels = new_geoent_labels_padded
+        if _review_labels is None:
+            new_review_labels = None
+        else:
+            new_review_labels = new_review_labels_padded
+        if _attention_mask is None:
+            attention_mask = None
+        else:
+            attention_mask = attention_mask.to(dtype=_attention_mask.dtype)
+
+        if _position_ids is None:
+            position_ids = None
+        # print('post position_ids',position_ids, )
+        # print('post attention mask', attention_mask, attention_mask.shape)
+        # print('post key_values', past_key_values,)
+        # print('new_input_embeds', new_input_embeds, new_input_embeds.shape)
+        # print('new labels', new_labels, new_labels.shape)
+        #print('new aspect labels', new_aspect_labels)
+
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, new_aspect_labels, new_geoent_labels, new_review_labels

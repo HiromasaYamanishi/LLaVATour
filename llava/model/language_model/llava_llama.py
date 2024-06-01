@@ -24,11 +24,15 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
-from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
-
+from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM#LlavaPOIMetaForCausalLM
+from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, USER_TOKEN_INDEX, POI_TOKEN_INDEX
 
 class LlavaConfig(LlamaConfig):
     model_type = "llava_llama"
+    
+class LlavaPOIConfig(LlamaConfig):
+    model_type = "llava_poi_llama"
 
 
 class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
@@ -43,7 +47,11 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
     def __init__(self, config):
         super(LlamaForCausalLM, self).__init__(config)
+        #print('llama model config', config)
         self.model = LlavaLlamaModel(config)
+        #print('model', self.model)
+        # for k,v in self.model.named_parameters():
+        #     print(k, v)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -69,7 +77,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
+        #print('input_embeds', inputs_embeds, input_ids)
         if inputs_embeds is None:
             (
                 input_ids,
@@ -87,6 +95,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 images,
                 image_sizes
             )
+
+        if inputs_embeds is None and input_ids is not None:
+            input_ids[input_ids>=self.vocab_size] = self.vocab_size - 1
+            input_ids[input_ids<0] = self.vocab_size - 1
 
         return super().forward(
             input_ids=input_ids,
@@ -113,7 +125,46 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
-
+        if images is not None:
+            (
+                inputs,
+                position_ids,
+                attention_mask,
+                _,
+                inputs_embeds,
+                _
+            ) = self.prepare_inputs_labels_for_multimodal(
+                inputs,
+                position_ids,
+                attention_mask,
+                None,
+                None,
+                images,
+                image_sizes=image_sizes
+            )
+        else:
+            #print('inputs', inputs.shape)
+            inputs_embeds = self.get_model().embed_tokens(inputs)
+        #print('input_embeds.', inputs_embeds.shape)
+        return super().generate(
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
+        
+    @torch.no_grad()
+    def generate_rec(
+        self,
+        inputs: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        image_sizes: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[GenerateOutput, torch.LongTensor]:
+        position_ids = kwargs.pop("position_ids", None)
+        attention_mask = kwargs.pop("attention_mask", None)
+        if "inputs_embeds" in kwargs:
+            raise NotImplementedError("`inputs_embeds` is not supported")
         if images is not None:
             (
                 inputs,
@@ -138,6 +189,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
+            num_beams=10,
+            num_return_sequences=5,
+            no_repeat_ngram_size=2,
+            early_stopping=True
             **kwargs
         )
 
@@ -156,3 +211,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
 AutoConfig.register("llava_llama", LlavaConfig)
 AutoModelForCausalLM.register(LlavaConfig, LlavaLlamaForCausalLM)
+
+#AutoConfig.register("llava_poi_llama", LlavaPOIConfig)
+#AutoModelForCausalLM.register(LlavaPOIConfig, LlavaPOILlamaForCausalLM)

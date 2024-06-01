@@ -1,0 +1,203 @@
+[2024-03-14 20:58:35,165] [INFO] [real_accelerator.py:161:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2024-03-14 20:58:39,426] [WARNING] [runner.py:202:fetch_hostfile] Unable to find hostfile, will proceed with training with local resources only.
+[2024-03-14 20:58:39,426] [INFO] [runner.py:571:main] cmd = /home/yamanishi/.pyenv/versions/miniconda3-latest/envs/llava/bin/python3.10 -u -m deepspeed.launcher.launch --world_info=eyJsb2NhbGhvc3QiOiBbNCwgNSwgNiwgN119 --master_addr=127.0.0.1 --master_port=20005 --enable_each_rank_log=None llava/train/train_mem.py --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 --deepspeed ./scripts/zero3.json --model_name_or_path lmsys/vicuna-13b-v1.5 --version v1 --data_path ./playground/data/v4/train_conv.json --image_folder /home/yamanishi/project/trip_recommend/data/jalan_image_with_caption --vision_tower openai/clip-vit-large-patch14-336 --pretrain_mm_mlp_adapter ./checkpoints/llava-v1.5-mlp2x-336px-pretrain-vicuna-13b-v1.5/mm_projector.bin --mm_projector_type mlp2x_gelu --mm_vision_select_layer -2 --mm_use_im_start_end False --mm_use_im_patch_token False --image_aspect_ratio pad --group_by_modality_length True --bf16 True --output_dir ./checkpoints/llava-v1.5-13b-jalan-review-lora-v4-conv --num_train_epochs 1 --per_device_train_batch_size 8 --per_device_eval_batch_size 4 --gradient_accumulation_steps 1 --evaluation_strategy no --save_strategy steps --save_steps 50000 --save_total_limit 1 --learning_rate 2e-4 --weight_decay 0. --warmup_ratio 0.03 --lr_scheduler_type cosine --logging_steps 1 --tf32 True --model_max_length 2048 --gradient_checkpointing True --dataloader_num_workers 4 --lazy_preprocess True --report_to wandb
+[2024-03-14 20:58:44,240] [INFO] [real_accelerator.py:161:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2024-03-14 20:58:46,120] [INFO] [launch.py:145:main] WORLD INFO DICT: {'localhost': [4, 5, 6, 7]}
+[2024-03-14 20:58:46,120] [INFO] [launch.py:151:main] nnodes=1, num_local_procs=4, node_rank=0
+[2024-03-14 20:58:46,120] [INFO] [launch.py:162:main] global_rank_mapping=defaultdict(<class 'list'>, {'localhost': [0, 1, 2, 3]})
+[2024-03-14 20:58:46,120] [INFO] [launch.py:163:main] dist_world_size=4
+[2024-03-14 20:58:46,120] [INFO] [launch.py:165:main] Setting CUDA_VISIBLE_DEVICES=4,5,6,7
+[2024-03-14 20:58:49,955] [INFO] [real_accelerator.py:161:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2024-03-14 20:58:49,979] [INFO] [real_accelerator.py:161:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2024-03-14 20:58:50,003] [INFO] [real_accelerator.py:161:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2024-03-14 20:58:50,025] [INFO] [real_accelerator.py:161:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2024-03-14 20:58:52,260] [INFO] [comm.py:637:init_distributed] cdb=None
+[2024-03-14 20:58:52,260] [INFO] [comm.py:637:init_distributed] cdb=None
+[2024-03-14 20:58:52,261] [INFO] [comm.py:637:init_distributed] cdb=None
+[2024-03-14 20:58:52,261] [INFO] [comm.py:668:init_distributed] Initializing TorchBackend in DeepSpeed with backend nccl
+[2024-03-14 20:58:52,261] [INFO] [comm.py:637:init_distributed] cdb=None
+model_args
+model_args
+model_args
+model_args
+[2024-03-14 20:58:56,815] [INFO] [partition_parameters.py:348:__exit__] finished initializing model - num_params = 363, num_elems = 13.02B
+lmsys/vicuna-13b-v1.5 None flash_attention_2 torch.bfloat16 {}
+lmsys/vicuna-13b-v1.5 None flash_attention_2 torch.bfloat16 {}
+lmsys/vicuna-13b-v1.5 None flash_attention_2 torch.bfloat16 {}
+lmsys/vicuna-13b-v1.5 None flash_attention_2 torch.bfloat16 {}
+Adding LoRA adapters...
+[2024-03-14 20:59:18,544] [INFO] [partition_parameters.py:348:__exit__] finished initializing model - num_params = 754, num_elems = 13.32B
+build projector config build projector config LlavaConfig {
+  "_name_or_path": "lmsys/vicuna-13b-v1.5",
+  "architectures": [
+    "LlamaForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "down_sample": false,
+  "eos_token_id": 2,
+  "hidden_act": "silu",
+  "hidden_size": 5120,
+  "initializer_range": 0.02,
+  "intermediate_size": 13824,
+  "max_length": 4096,
+  "max_position_embeddings": 4096,
+  "mm_hidden_size": 1024,
+  "mm_patch_merge_type": "flat",
+  "mm_projector_type": "mlp2x_gelu",
+  "mm_vision_select_feature": "patch",
+  "mm_vision_select_layer": -2,
+  "mm_vision_tower": "openai/clip-vit-large-patch14-336",
+  "model_type": "llava_llama",
+  "num_attention_heads": 40,
+  "num_hidden_layers": 40,
+  "num_key_value_heads": 40,
+  "pad_token_id": 0,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": null,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "float16",
+  "transformers_version": "4.37.2",
+  "use_cache": false,
+  "use_mm_proj": true,
+  "vocab_size": 32000
+}
+
+build projector config LlavaConfig {
+  "_name_or_path": "lmsys/vicuna-13b-v1.5",
+  "architectures": [
+    "LlamaForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "down_sample": false,
+  "eos_token_id": 2,
+  "hidden_act": "silu",
+  "hidden_size": 5120,
+  "initializer_range": 0.02,
+  "intermediate_size": 13824,
+  "max_length": 4096,
+  "max_position_embeddings": 4096,
+  "mm_hidden_size": 1024,
+  "mm_patch_merge_type": "flat",
+  "mm_projector_type": "mlp2x_gelu",
+  "mm_vision_select_feature": "patch",
+  "mm_vision_select_layer": -2,
+  "mm_vision_tower": "openai/clip-vit-large-patch14-336",
+  "model_type": "llava_llama",
+  "num_attention_heads": 40,
+  "num_hidden_layers": 40,
+  "num_key_value_heads": 40,
+  "pad_token_id": 0,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": null,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "float16",
+  "transformers_version": "4.37.2",
+  "use_cache": false,
+  "use_mm_proj": true,
+  "vocab_size": 32000
+}
+
+LlavaConfig {
+  "_name_or_path": "lmsys/vicuna-13b-v1.5",
+  "architectures": [
+    "LlamaForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "down_sample": false,
+  "eos_token_id": 2,
+  "hidden_act": "silu",
+  "hidden_size": 5120,
+  "initializer_range": 0.02,
+  "intermediate_size": 13824,
+  "max_length": 4096,
+  "max_position_embeddings": 4096,
+  "mm_hidden_size": 1024,
+  "mm_patch_merge_type": "flat",
+  "mm_projector_type": "mlp2x_gelu",
+  "mm_vision_select_feature": "patch",
+  "mm_vision_select_layer": -2,
+  "mm_vision_tower": "openai/clip-vit-large-patch14-336",
+  "model_type": "llava_llama",
+  "num_attention_heads": 40,
+  "num_hidden_layers": 40,
+  "num_key_value_heads": 40,
+  "pad_token_id": 0,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": null,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "float16",
+  "transformers_version": "4.37.2",
+  "use_cache": false,
+  "use_mm_proj": true,
+  "vocab_size": 32000
+}
+
+build projector config LlavaConfig {
+  "_name_or_path": "lmsys/vicuna-13b-v1.5",
+  "architectures": [
+    "LlamaForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "down_sample": false,
+  "eos_token_id": 2,
+  "hidden_act": "silu",
+  "hidden_size": 5120,
+  "initializer_range": 0.02,
+  "intermediate_size": 13824,
+  "max_length": 4096,
+  "max_position_embeddings": 4096,
+  "mm_hidden_size": 1024,
+  "mm_patch_merge_type": "flat",
+  "mm_projector_type": "mlp2x_gelu",
+  "mm_vision_select_feature": "patch",
+  "mm_vision_select_layer": -2,
+  "mm_vision_tower": "openai/clip-vit-large-patch14-336",
+  "model_type": "llava_llama",
+  "num_attention_heads": 40,
+  "num_hidden_layers": 40,
+  "num_key_value_heads": 40,
+  "pad_token_id": 0,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": null,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "float16",
+  "transformers_version": "4.37.2",
+  "use_cache": false,
+  "use_mm_proj": true,
+  "vocab_size": 32000
+}
+
+Formatting inputs...Skip in lazy mode
+Parameter Offload: Total persistent parameters: 749568 in 328 params
+{'loss': 1.8024, 'learning_rate': 1.7006802721088437e-07, 'epoch': 0.0}
+{'loss': 1.7987, 'learning_rate': 3.4013605442176873e-07, 'epoch': 0.0}
+{'loss': 1.819, 'learning_rate': 5.10204081632653e-07, 'epoch': 0.0}
+{'loss': 1.7969, 'learning_rate': 6.802721088435375e-07, 'epoch': 0.0}
+{'loss': 1.7951, 'learning_rate': 8.503401360544219e-07, 'epoch': 0.0}
+WARNING: tokenization mismatch: 399 vs. 480. (ignored)
+{'loss': 1.7739, 'learning_rate': 1.020408163265306e-06, 'epoch': 0.0}
+{'loss': 1.7853, 'learning_rate': 1.1904761904761904e-06, 'epoch': 0.0}
+[2024-03-14 21:01:02,057] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628447
+[2024-03-14 21:01:02,261] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628447
+[2024-03-14 21:01:02,870] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628448
+[2024-03-14 21:01:03,102] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628447
+[2024-03-14 21:01:03,102] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628448
+[2024-03-14 21:01:03,547] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628449
+[2024-03-14 21:01:04,163] [INFO] [launch.py:315:sigkill_handler] Killing subprocess 1628450
+[2024-03-14 21:01:04,825] [INFO] [launch.py:324:sigkill_handler] Main process received SIGINT, exiting

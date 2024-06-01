@@ -7,13 +7,11 @@ from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 class CLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()
-
         self.is_loaded = False
 
         self.vision_tower_name = vision_tower
         self.select_layer = args.mm_vision_select_layer
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
-
         if not delay_load:
             self.load_model()
         elif getattr(args, 'unfreeze_mm_vision_tower', False):
@@ -33,6 +31,8 @@ class CLIPVisionTower(nn.Module):
         self.is_loaded = True
 
     def feature_select(self, image_forward_outs):
+        hidden_states = image_forward_outs.hidden_states
+        # [batch_sizex577x1024がいくつか並んでいる]
         image_features = image_forward_outs.hidden_states[self.select_layer]
         if self.select_feature == 'patch':
             image_features = image_features[:, 1:]

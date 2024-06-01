@@ -56,18 +56,18 @@ def split_to_even_chunks(indices, lengths, num_chunks):
 
     return chunks
 
-
-def get_modality_length_grouped_indices(lengths, batch_size, world_size, generator=None):
+def get_poi_length_grouped_indices(lengths, spot_names, batch_size,  world_size, generator=None):
     # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
     assert all(l != 0 for l in lengths), "Should not have zero length."
     if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
         # all samples are in the same modality
-        return get_length_grouped_indices(lengths, batch_size, world_size, generator=generator)
+        return get_poi_length_grouped_indices(lengths, spot_names, batch_size, world_size, generator=generator)
     mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
     lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
 
-    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices(mm_lengths, batch_size, world_size, generator=None)]
-    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices(lang_lengths, batch_size, world_size, generator=None)]
+    spot_names_mm, spot_names_lang = spot_names[mm_indices], spot_names[lang_indices]
+    mm_shuffle = [mm_indices[i] for i in get_poi_length_grouped_indices(mm_lengths, spot_names_mm, batch_size, world_size, generator=None)]
+    lang_shuffle = [lang_indices[i] for i in get_poi_length_grouped_indices(lang_lengths, spot_names_lang, batch_size, world_size, generator=None)]
     megabatch_size = world_size * batch_size
     mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
     lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
@@ -81,12 +81,41 @@ def get_modality_length_grouped_indices(lengths, batch_size, world_size, generat
 
     if len(additional_batch) > 0:
         megabatches.append(sorted(additional_batch))
+    return [i for megabatch in megabatches for i in megabatch]
+
+def get_modality_length_grouped_indices(lengths, batch_size, world_size, generator=None):
+    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
+    assert all(l != 0 for l in lengths), "Should not have zero length."
+    if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
+        # all samples are in the same modality
+        return get_length_grouped_indices(lengths, batch_size, world_size, generator=generator)
+    mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
+    lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
+    # 画像のみと言語のみを別々に扱う
+    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices(mm_lengths, batch_size, world_size, generator=None)]
+    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices(lang_lengths, batch_size, world_size, generator=None)]
+    megabatch_size = world_size * batch_size
+    mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
+    lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
+
+    last_mm = mm_megabatches[-1]
+    last_lang = lang_megabatches[-1]
+    additional_batch = last_mm + last_lang
+    megabatches = mm_megabatches[:-1] + lang_megabatches[:-1]
+    # megabatchedをさらにシャッフルしている(これいるのか？)
+    megabatch_indices = torch.randperm(len(megabatches), generator=generator)
+    megabatches = [megabatches[i] for i in megabatch_indices]
+
+    if len(additional_batch) > 0:
+        megabatches.append(sorted(additional_batch))
 
     return [i for megabatch in megabatches for i in megabatch]
 
 
 def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, merge=True):
     # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
+    # gloabal_batch_size (megabatch) = batch_size * world_size
+    # megabatch内で長さ順にソートしてcollateする
     indices = torch.randperm(len(lengths), generator=generator)
     megabatch_size = world_size * batch_size
     megabatches = [indices[i : i + megabatch_size].tolist() for i in range(0, len(lengths), megabatch_size)]
@@ -95,6 +124,54 @@ def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, 
 
     return [i for megabatch in megabatches for batch in megabatch for i in batch]
 
+def get_poi_length_grouped_indices(lengths, spot_names, batch_size, world_size, generator=None, merge=True):
+    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
+    # gloabal_batch_size (megabatch) = batch_size * world_size
+    # megabatch内で長さ順にソートしてcollateする
+    
+    indices = torch.argsort(torch.tensor(spot_names))
+    #indices = torch.randperm(len(lengths), generator=generator)
+    megabatch_size = world_size * batch_size
+    megabatches = [indices[i : i + megabatch_size].tolist() for i in range(0, len(lengths), megabatch_size)]
+    megabatches = [sorted(megabatch, key=lambda i: lengths[i], reverse=True) for megabatch in megabatches]
+    megabatches = [split_to_even_chunks(megabatch, lengths, world_size) for megabatch in megabatches]
+
+    return [i for megabatch in megabatches for batch in megabatch for i in batch]
+
+class POIGroupedSampler(Sampler):
+    r"""
+    Sampler that samples indices in a way that groups together features of the dataset of roughly the same length while
+    keeping a bit of randomness.
+    """
+
+    def __init__(
+        self,
+        batch_size: int,
+        world_size: int,
+        lengths: Optional[List[int]] = None,
+        spot_names: Optional[List[int]] = None,
+        generator=None,
+        group_by_poi: bool = False,
+    ):
+        if lengths is None:
+            raise ValueError("Lengths must be provided.")
+
+        self.batch_size = batch_size
+        self.world_size = world_size
+        self.lengths = lengths
+        self.spot_names = spot_names
+        self.generator = generator
+        self.group_by_poi = group_by_poi
+
+    def __len__(self):
+        return len(self.lengths)
+
+    def __iter__(self):
+        if self.group_by_poi:
+            indices = get_poi_length_grouped_indices(self.lengths, self.spot_names, self.batch_size, self.world_size, generator=self.generator)
+        else:
+            indices = get_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
+        return iter(indices)
 
 class LengthGroupedSampler(Sampler):
     r"""
@@ -118,6 +195,7 @@ class LengthGroupedSampler(Sampler):
         self.lengths = lengths
         self.generator = generator
         self.group_by_modality = group_by_modality
+        #print('init sampler', self.get_indices())
 
     def __len__(self):
         return len(self.lengths)
@@ -128,6 +206,14 @@ class LengthGroupedSampler(Sampler):
         else:
             indices = get_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
         return iter(indices)
+    
+    def get_indices(self):
+        if self.group_by_modality:
+            indices = get_modality_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
+        else:
+            indices = get_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
+        return indices
+        
 
 
 class LLaVATrainer(Trainer):
@@ -143,6 +229,16 @@ class LLaVATrainer(Trainer):
                 world_size=self.args.world_size * self.args.gradient_accumulation_steps,
                 lengths=lengths,
                 group_by_modality=True,
+            )
+        elif self.args.group_by_poi:
+            lengths = self.train_dataset.modality_lengths
+            spot_names = self.train_dataset.spot_names
+            return POIGroupedSampler(
+                self.args.train_batch_size,
+                world_size=self.args.world_size * self.args.gradient_accumulation_steps,
+                lengths=lengths,
+                spot_names=spot_names,
+                group_by_poi=True
             )
         else:
             return super()._get_train_sampler()
@@ -253,3 +349,44 @@ class LLaVATrainer(Trainer):
             pass
         else:
             super(LLaVATrainer, self)._save(output_dir, state_dict)
+
+class LLaVATourTrainer(LLaVATrainer):
+    def __init__(self):
+        super().__init__()
+        
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        How the loss is computed by Trainer. By default, all models return the loss in the first element.
+
+        Subclass and override for custom behavior.
+        """
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+        outputs = model(**inputs)
+        # Save past state if it exists
+        # TODO: this needs to be fixed and made cleaner later.
+        if self.args.past_index >= 0:
+            self._past = outputs[self.args.past_index]
+
+        if labels is not None:
+            unwrapped_model = unwrap_model(model)
+            if _is_peft_model(unwrapped_model):
+                model_name = unwrapped_model.base_model.model._get_name()
+            else:
+                model_name = unwrapped_model._get_name()
+            if model_name in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
+                loss = self.label_smoother(outputs, labels, shift_labels=True)
+            else:
+                loss = self.label_smoother(outputs, labels)
+        else:
+            if isinstance(outputs, dict) and "loss" not in outputs:
+                raise ValueError(
+                    "The model did not return a loss from the inputs, only the following keys: "
+                    f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
+                )
+            # We don't use .loss here since the model may return tuples instead of ModelOutput.
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        return (loss, outputs) if return_outputs else loss

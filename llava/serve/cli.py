@@ -48,7 +48,7 @@ def main(args):
         print('[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}'.format(conv_mode, args.conv_mode, args.conv_mode))
     else:
         args.conv_mode = conv_mode
-
+    print(args.conv_mode)
     conv = conv_templates[args.conv_mode].copy()
     if "mpt" in model_name.lower():
         roles = ('user', 'assistant')

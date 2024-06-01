@@ -4,9 +4,10 @@ import base64
 import torch
 import math
 import ast
+import re
 
 from transformers import StoppingCriteria
-from llava.constants import IMAGE_TOKEN_INDEX
+from llava.constants import IMAGE_TOKEN_INDEX, POI_TOKEN_INDEX, USER_TOKEN_INDEX
 
 
 def select_best_resolution(original_size, possible_resolutions):
@@ -181,10 +182,53 @@ def process_images(images, image_processor, model_cfg):
         new_images = torch.stack(new_images, dim=0)
     return new_images
 
+def tokenizer_image_token(prompt, tokenizer, image_token_index=-200, poi_token_index=-10000, user_token_index=-100000,return_tensors=None):
+    # 分割パターンを定義（<image> または <poi n>）
+    split_pattern = r'(<image>|<poi\d+>|<user\d+>|<geo\d+>)'
+    #print('prompt', prompt)
+    # 正規表現を使用してプロンプトを分割
+    #print('prompt', prompt)
+    prompt_chunks = re.split(split_pattern, prompt)
+    #print('prompt', prompt_chunks)
+    input_ids = []
+    for chunk in prompt_chunks:
+        #[print('chunk', chunk)
+        if chunk.startswith('<image>'):
+            input_ids.append(image_token_index)
+        elif chunk.startswith('<poi'):
+            # <poi n>からnを抽出し、対応するトークンに変換
+            poi_number = int(re.search(r'\d+', chunk).group())
+            input_ids.append(poi_token_index - poi_number)  # 例: <poi n>のnに基づく処理
+        elif chunk.startswith('<user'):
+            # <poi n>からnを抽出し、対応するトークンに変換
+            user_number = int(re.search(r'\d+', chunk).group())
+            input_ids.append(user_token_index - user_number)  # 例: <poi n>のnに基づく処理
+        elif chunk.startswith('<geo'):
+            geo_number = int(re.search(r'\d+', chunk).group())
+            input_ids.append(poi_token_index - geo_number)  # 例: <poi n>のnに基づく処理
+        elif chunk:
+            # 通常のテキストチャンクをトークナイズ
+            # 文頭の場合は<bos>トークンを含める
+            if len(input_ids):
+                input_ids.extend(tokenizer(chunk).input_ids[1:])
+            # 文中の場合は<bos>トークンを含めない
+            else:
+                input_ids.extend(tokenizer(chunk).input_ids)
 
-def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
-
+    # return_tensorsパラメータの処理
+    if return_tensors is not None:
+        if return_tensors == 'pt':
+            return torch.tensor(input_ids, dtype=torch.long)
+        else:
+            raise ValueError('Unsupported tensor type: {}'.format(return_tensors))
+    #print('input_ids', input_ids)
+    return input_ids
+    
+def tokenizer_image_token_(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
+    split_pattern = r'<image[\d]*>'
+    prompt_chunks = [tokenizer(chunk).input_ids for chunk in re.split(split_pattern, prompt)]
+    #prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
+    #print('tokenize image prompt_chunks', prompt_chunks)
     def insert_separator(X, sep):
         return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
 
@@ -192,11 +236,14 @@ def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX
     offset = 0
     if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
         offset = 1
+        #print(prompt_chunks[0][0])
         input_ids.append(prompt_chunks[0][0])
 
     for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
+        #print('x', x)
         input_ids.extend(x[offset:])
-
+    #print('tokenize image input_ids', input_ids)
+    # <image>は-200で置き換える.それ以外は普通につなげる
     if return_tensors is not None:
         if return_tensors == 'pt':
             return torch.tensor(input_ids, dtype=torch.long)
