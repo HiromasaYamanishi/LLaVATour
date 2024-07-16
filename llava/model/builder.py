@@ -49,7 +49,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
 
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
-
+    print('model name', model_name)
     if 'llava' in model_name.lower():
         # Load LLaVA model
         if 'lora' in model_name.lower() and model_base is None:
@@ -364,7 +364,7 @@ def load_pretrained_model2(model_path, model_base, model_name, load_8bit=False, 
             print('Loading LLaVA from base model...')
             lora_cfg_pretrained.down_sample = True
             model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=False, config=lora_cfg_pretrained, **kwargs)
-            model.down_sampler = DownSampler(lora_config_pretrained.hidden_size)
+            #model.down_sampler = DownSampler(lora_config_pretrained.hidden_size)
             token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
             if model.lm_head.weight.shape[0] != token_num:
                 model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))

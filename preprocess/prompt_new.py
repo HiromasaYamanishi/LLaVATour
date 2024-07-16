@@ -1,7 +1,6 @@
 import random
 from easydict import EasyDict
 import pandas as pd
-import math
 
 
 def add_premise_prompt(spot, pattern="caption", gender=None, age=None, tag=None, month=None, season=None):
@@ -323,8 +322,7 @@ def make_tag_prediction_prompt(nice_count, spot_name, date, caption):
             answer = "いいえ"
     elif task_type == 3:
         prompt += "いいね数を予測してください"
-        answer = round(math.log10(nice_count+1), 1)
-        #print(answer)
+        answer = nice_count
     return prompt, answer, task_type, data_type
 
 
@@ -454,5 +452,3 @@ prompt_pvqa = EasyDict({
 "prompt8" : 'この{image_suffix}は{spot}に関する{image_suffix}です. この{image_suffix}に関する{exp_suffix}を「{reviews}」というレビューを元に{do_suffix}してください',
 "prompt9" : 'この{image_suffix}は{spot}の「{keyword}」に関する{image_suffix}です. この{image_suffix}に関する{exp_suffix}を「{reviews}」というレビューを元に{do_suffix}してください'
 })
-
-

@@ -252,6 +252,8 @@ def tokenizer_image_token_(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDE
 
 
 def get_model_name_from_path(model_path):
+    if 'step' in model_path:
+        model_path = '/'.join(model_path.split('/')[:-1])
     model_path = model_path.strip("/")
     model_paths = model_path.split("/")
     if model_paths[-1].startswith('checkpoint-'):

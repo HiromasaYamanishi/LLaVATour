@@ -22,6 +22,7 @@ import logging
 import pathlib
 from typing import Dict, Optional, Sequence, List
 from safetensors import safe_open
+import pickle
 import torch
 
 import transformers
@@ -30,7 +31,7 @@ import tokenizers
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
 from llava.train.llava_trainer import LLaVATrainer, LLaVARetrievalTrainer
-
+from llava.model.language_model.llava_retrieve_llama import LlavaRetrieveForCausalLM
 from llava import conversation as conversation_lib
 from llava.model import *
 from llava.mm_utils import tokenizer_image_token
@@ -719,6 +720,9 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
+        
+        with open('./data/kg/sakg.pkl', 'rb') as f:
+            self.sakg = pickle.load(f)
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -739,12 +743,39 @@ class LazySupervisedDataset(Dataset):
             cur_len = cur_len if 'image' in sample else -cur_len
             length_list.append(cur_len)
         return length_list
+    
+    def retrieve_triplets(self, entity, neighbor_thresh=20):
+        triplets = []
+        if entity not in self.sakg:return []
+        neighbors = list(self.sakg.neighbors(entity))
+        neighbors = sorted(neighbors, key=lambda x: len(self.sakg[entity][x]['relations']), reverse=True)[:neighbor_thresh]
+        for i, neighbor in enumerate(neighbors):
+            edge_data = self.sakg[entity][neighbor]['relations']
+            sorted_edge_data = sorted(edge_data.items(), key=lambda x: x[1], reverse=True)[:20]        
+            triplets.extend([(entity, neighbor, relation, count, i) for relation, count in sorted_edge_data])
+        return triplets
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        
+        id = sources[0]['id']
+        spot_name = id.split('_')[0]
+        if 'qa' in id:
+            tasks = ['QA' for _ in range(len(sources[0]['conversations'])//2)]
+        else:
+            tasks = sources[0].get('task_ids', [])
+            
+        if 'shuffle' in id:
+            start_entities = [LazySupervisedDataset.extract_spot_name_qa(q['value']) for q in sources[0]['conversations'][0::2]]
+        else:
+            start_entities = [spot_name for _ in range(len(tasks))]
+        print('staert_entities', start_entities)
+        triplets = [self.retrieve_triplets(entity) for entity in start_entities]
+        prompts = [conv['value'] for conv in sources[0]['conversations'] if conv['from']=='human']
+        
         if 'image' in sources[0]:
             image_file = self.list_data_dict[i]['image']
             image_folder = self.data_args.image_folder
@@ -787,6 +818,10 @@ class LazySupervisedDataset(Dataset):
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            
+        data_dict['triplet'] = triplets
+        data_dict['prompt'] = prompts
+        data_dict['task'] = tasks
         return data_dict
 
 
@@ -820,7 +855,11 @@ class DataCollatorForSupervisedDataset(object):
                 batch['images'] = torch.stack(images)
             else:
                 batch['images'] = images
-
+                
+        batch['triplets'] = [instance['triplet'] for instance in instances]
+        batch['prompts'] = [instance['prompt'] for instance in instances]
+        batch['tasks'] = [instance['task'] for instance in instances]
+        
         return batch
 
 
@@ -875,7 +914,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
         else:
-            model = LlavaLlamaForCausalLM.from_pretrained(
+            model = LlavaRetrieveForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
@@ -1046,7 +1085,13 @@ def train(attn_implementation=None):
                 tensors[key] = f.get_tensor(key)
         # parameter_keys = model.named_parameters.keys()
         set_peft_model_state_dict(model, tensors)
-        
+    
+    model.get_model().initialize_entity_modules()
+    #entity_tower = model.get_entity_tower()
+    #entity_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+    model.get_model().get_entity_tower().to(dtype=torch.bfloat16, device='cuda')
+    model.get_model().entity_projector.to(dtype=torch.bfloat16, device='cuda')
+    model.get_model().relation_projector.to(dtype=torch.bfloat16, device='cuda')
     # trainer = LLaVARetrievalTrainer(model=model,
     #                                 tokenizer=tokenizer,
     #                                 args=training_args,

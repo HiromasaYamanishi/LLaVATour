@@ -6,7 +6,7 @@
 #
 #        http://www.apache.org/licenses/LICENSE-2.0
 #
-#    Unless required by applicable law or agreed to in writing, software
+#    Unless required by applicable law or greed to in writing, software
 #    distributed under the License is distributed on an "AS IS" BASIS,
 #    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #    See the License for the specific language governing permissions and
@@ -18,8 +18,9 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-from .multimodal_encoder.builder import build_vision_tower, build_geo_tower
-from .multimodal_projector.builder import build_vision_projector, DownSampler
+from .multimodal_encoder.builder import build_vision_tower, build_geo_tower, build_entity_tower
+from .retriever.builder import build_retriever
+from .multimodal_projector.builder import build_vision_projector, DownSampler, build_entity_projector
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, USER_TOKEN_INDEX, POI_TOKEN_INDEX
 from llava.mm_utils import get_anyres_image_grid_shape
@@ -74,7 +75,7 @@ class LlavaMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
-        self.config.down_sample = model_args.down_sample
+        #self.config.down_sample = model_args.down_sample
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
@@ -82,15 +83,15 @@ class LlavaMetaModel:
             if 'unpad' in mm_patch_merge_type:
                 embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
                 self.image_newline = nn.Parameter(
-                    torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
+                   torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
                 )
         else:
             # In case it is frozen by LoRA
             for p in self.mm_projector.parameters():
                 p.requires_grad = True
                 
-        if self.config.down_sample:
-            self.down_sampler = DownSampler(self.config.hidden_size, (8, 8))
+        #if self.config.down_sample:
+        #    self.down_sampler = DownSampler(self.config.hidden_size, (8, 8))
 
         if pretrain_mm_mlp_adapter is not None:
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
@@ -112,6 +113,30 @@ class LlavaGeoMetaModel(LlavaMetaModel):
         geo_modules = build_geo_tower(model_args, coordinates)
         self.geo_tower = geo_modules
         
+        
+class LlavaRetrieveMetaModel(LlavaMetaModel):
+    def __init__(self, config):
+        super().__init__(config)
+        
+    def get_retriever(self):
+        retriever = getattr(self, 'retriever', None)
+        return retriever
+    
+    def get_entity_tower(self):
+        entity_tower = getattr(self, 'entity_tower', None)
+        return entity_tower
+    
+    def initialize_entity_modules(self):
+        entity_tower = build_entity_tower()
+        self.entity_tower = entity_tower
+        entity_projector = build_entity_projector(self.config)
+        relation_projector = build_entity_projector(self.config)
+        self.entity_projector = entity_projector        
+        self.relation_projector = relation_projector
+            
+    def initialize_retriever(self, model_args):
+        retriever = build_retriever()
+        self.retriever = retriever
 
 def unpad_image(tensor, original_size):
     """
@@ -156,8 +181,8 @@ class LlavaMetaForCausalLM(ABC):
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
         image_features = self.get_model().mm_projector(image_features)
-        if self.config.down_sample:
-            image_features = self.get_model().down_sampler(image_features)
+        #if self.config.down_sample:
+        #    image_features = self.get_model().down_sampler(image_features)
         return image_features
     
     def encode_and_process_images(self, images, image_sizes):
@@ -262,6 +287,7 @@ class LlavaMetaForCausalLM(ABC):
         new_labels = []
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
+            # print('cur_input_ids', cur_input_ids)
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum() #IMAGE_TOKEN_INDEX=-200
             
             #print('num_images', num_images, len(image_features))
@@ -327,6 +353,7 @@ class LlavaMetaForCausalLM(ABC):
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
         #print('new input emb0', new_input_embeds, new_input_embeds[0].shape)
         for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
+            print('cur_new_labels', cur_new_labels)
             cur_len = cur_new_embed.shape[0]
             if getattr(self.config, 'tokenizer_padding_side', 'right') == "left":
                 new_input_embeds_padded.append(torch.cat((
@@ -412,6 +439,173 @@ class LlavaMetaForCausalLM(ABC):
                     p.requires_grad = False
                 for p in self.get_output_embeddings().parameters():
                     p.requires_grad = False
+                    
+class LlavaRetrieveMetaForCausalLM(LlavaMetaForCausalLM):
+    def retrieve(self, prompt, start_entity, task, top_k=3):
+        return self.get_model().get_retriever()(prompt, start_entity, task, top_k)
+        
+    def encode_and_process_triplets(self, triplets, tasks, prompts):
+        relation_features, entity_features, len_per_indices = self.get_model().get_entity_tower()(triplets, tasks, prompts)
+        relation_features = self.get_model().entity_projector(relation_features)
+        entity_features = self.get_model().relation_projector(entity_features)
+        return relation_features, entity_features, len_per_indices
+        
+    def prepare_inputs_labels_for_multimodal(
+        self, input_ids, position_ids, attention_mask, past_key_values, labels,
+        images, image_sizes=None, triplets=None, prompts=None, tasks=None 
+    ):
+        vision_tower = self.get_vision_tower()
+        if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels
+
+        # images: [4, 3, 336, 336]
+        #print('len images', len(images))
+        batch_size = len(images)
+        relation_embs, entity_embs, len_per_indices = self.encode_and_process_triplets(triplets, tasks, prompts)
+        print(relation_embs, entity_embs, len_per_indices)
+        #image_features = torch.zeros(batch_size, 576, 5120).to(images.device)
+        image_features = self.encode_and_process_images(images, image_sizes)
+        # [batch_size, 576(24x24?), 5120]
+        #print('image feature', len(image_features))
+        # TODO: image start / end is not implemented here to support pretraining.
+        if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
+            raise NotImplementedError
+        # Let's just add dummy tensors if they do not exist,
+        # it is a headache to deal with None all the time.
+        # But it is not ideal, and if you have a better idea,
+        # please open an issue / submit a PR, thanks.
+        _labels = labels
+        _position_ids = position_ids
+        _attention_mask = attention_mask
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        else:
+            attention_mask = attention_mask.bool()
+        if position_ids is None:
+            position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+        if labels is None:
+            labels = torch.full_like(input_ids, IGNORE_INDEX)
+
+        # remove the padding using attention_mask -- FIXME
+        _input_ids = input_ids
+        # attention_mask: おそらくtransformersのデフォルトでトークンがあるものだけにattention_maskがTrueになるよう設定されている
+
+        input_ids = [cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)]
+        labels = [cur_labels[cur_attention_mask] for cur_labels, cur_attention_mask in zip(labels, attention_mask)]
+
+        new_input_embeds = []
+        new_labels = []
+        cur_image_idx = 0
+        for batch_idx, cur_input_ids in enumerate(input_ids):
+            # print('cur_input_ids', cur_input_ids)
+            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum() #IMAGE_TOKEN_INDEX=-200
+            
+            #print('num_images', num_images, len(image_features))
+            if num_images == 0:
+                #print(len(image_features), cur_image_idx)
+                if cur_image_idx>=len(image_features):cur_image_idx=len(image_features)-1
+                cur_image_features = image_features[cur_image_idx]
+                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
+                new_input_embeds.append(cur_input_embeds)
+                new_labels.append(labels[batch_idx])
+                cur_image_idx += 1
+                continue
+            
+            # image_token_indices: 最初, IMAGE_TOKENのある場所, 最後
+            image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
+            cur_input_ids_noim = []
+            cur_labels = labels[batch_idx]
+            cur_labels_noim = []
+            # cur_input_ids_noim, cur_labels_noim: image tokenを除いたids, labels
+            for i in range(len(image_token_indices) - 1):
+                cur_input_ids_noim.append(cur_input_ids[image_token_indices[i]+1:image_token_indices[i+1]])
+                cur_labels_noim.append(cur_labels[image_token_indices[i]+1:image_token_indices[i+1]])
+            split_sizes = [x.shape[0] for x in cur_labels_noim]
+            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
+            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            cur_new_input_embeds = []
+            cur_new_labels = []
+
+            # <image>トークンがあるところに576x5120のimage_featureを挟んでいる
+            for i in range(num_images + 1):
+                cur_new_input_embeds.append(cur_input_embeds_no_im[i])
+                cur_new_labels.append(cur_labels_noim[i])
+                if i < num_images:
+                    if cur_image_idx>=len(image_features):cur_image_idx=len(image_features)-1
+                    cur_image_features = image_features[cur_image_idx] #[576, 5120]
+                    #print(cur_image_features.shape)
+                    cur_image_idx += 1
+                    cur_new_input_embeds.append(cur_image_features)
+                    cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    #print(cur_image_idx)
+            cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
+
+            cur_new_input_embeds = torch.cat(cur_new_input_embeds)
+            cur_new_labels = torch.cat(cur_new_labels)
+            new_input_embeds.append(cur_new_input_embeds)
+            new_labels.append(cur_new_labels)
+
+        # Truncate sequences to max length as image embeddings can make the sequence longer
+        tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
+        #print('tokenizer_model_max_length', tokenizer_model_max_length)
+        if tokenizer_model_max_length is not None:
+            new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
+            new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
+
+        # Combine them
+        max_len = max(x.shape[0] for x in new_input_embeds)
+        batch_size = len(new_input_embeds)
+
+        new_input_embeds_padded = []
+        new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
+        position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
+        #print('new input emb0', new_input_embeds, new_input_embeds[0].shape)
+        for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
+            print('cur_new_labels', cur_new_labels)
+            cur_len = cur_new_embed.shape[0]
+            if getattr(self.config, 'tokenizer_padding_side', 'right') == "left":
+                new_input_embeds_padded.append(torch.cat((
+                    torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device),
+                    cur_new_embed
+                ), dim=0))
+                if cur_len > 0:
+                    new_labels_padded[i, -cur_len:] = cur_new_labels
+                    attention_mask[i, -cur_len:] = True
+                    position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+            else:
+                new_input_embeds_padded.append(torch.cat((
+                    cur_new_embed,
+                    torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)
+                ), dim=0))
+                if cur_len > 0:
+                    new_labels_padded[i, :cur_len] = cur_new_labels
+                    attention_mask[i, :cur_len] = True
+                    position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+
+        new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
+        #print(len(image_features), len(new_input_embeds))
+        if _labels is None:
+            new_labels = None
+        else:
+            new_labels = new_labels_padded
+
+        if _attention_mask is None:
+            attention_mask = None
+        else:
+            attention_mask = attention_mask.to(dtype=_attention_mask.dtype)
+
+        if _position_ids is None:
+            position_ids = None
+        # print('post position_ids',position_ids, )
+        # print('post attention mask', attention_mask, attention_mask.shape)
+        # print('post key_values', past_key_values,)
+        #print('new_input_embeds', new_input_embeds, new_input_embeds.shape)
+        #print('new labels', new_labels, new_labels.shape)
+
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        
 
 class LlavaGeoMetaForCausalLM(LlavaMetaForCausalLM):
     def encode_geos(self, geo_ids):

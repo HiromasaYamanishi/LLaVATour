@@ -100,6 +100,8 @@ class DownSampler(nn.Module):
         x = self.peg(x)
         return x
     
+def build_entity_projector(config):
+    return nn.Linear(768, config.hidden_size)
 
 def build_vision_projector(config, delay_load=False, **kwargs):
     #print('build projector config', config)

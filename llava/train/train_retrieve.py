@@ -23,9 +23,10 @@ import pathlib
 from typing import Dict, Optional, Sequence, List
 from safetensors import safe_open
 import torch
-
+import re
 import transformers
 import tokenizers
+import torch.multiprocessing as multiprocessing
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
@@ -33,6 +34,8 @@ from llava.train.llava_trainer import LLaVATrainer, LLaVARetrievalTrainer
 
 from llava import conversation as conversation_lib
 from llava.model import *
+from llava.model.language_model.llava_retrieve_llama import LlavaRetrieveForCausalLM
+from llava.model.retriever.builder import Retriever
 from llava.mm_utils import tokenizer_image_token
 
 from PIL import Image
@@ -465,7 +468,8 @@ def preprocess_llama_2(
 def preprocess_v1(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False,
+    retrieved_entities: List = [],
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
@@ -481,7 +485,12 @@ def preprocess_v1(
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
             assert role == conv.roles[j % 2], f"{i}"
-            conv.append_message(role, sentence["value"])
+            value = sentence['value']
+            if j%2:
+                entity = '、'.join(retrieved_entities[j//2])
+                value += entity
+            conv.append_message(role, value)
+            
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
@@ -661,7 +670,8 @@ def preprocess_plain(
 def preprocess(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False,
+    retrieved_entities: List=[],
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -675,7 +685,7 @@ def preprocess(
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
-        return preprocess_v1(sources, tokenizer, has_image=has_image)
+        return preprocess_v1(sources, tokenizer, has_image=has_image, retrieved_entities=retrieved_entities)
     if conversation_lib.default_conversation.version == "mpt":
         return preprocess_mpt(sources, tokenizer, has_image=has_image)
     # add end signal and concatenate together
@@ -711,7 +721,8 @@ class LazySupervisedDataset(Dataset):
 
     def __init__(self, data_path: str,
                  tokenizer: transformers.PreTrainedTokenizer,
-                 data_args: DataArguments):
+                 data_args: DataArguments,
+                 model):
         super(LazySupervisedDataset, self).__init__()
         list_data_dict = json.load(open(data_path, "r"))
 
@@ -719,7 +730,11 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
-
+        
+        #self.retriever = Retriever()
+        #self.retriever.to('cuda')
+        self.model = model
+        
     def __len__(self):
         return len(self.list_data_dict)
 
@@ -739,12 +754,39 @@ class LazySupervisedDataset(Dataset):
             cur_len = cur_len if 'image' in sample else -cur_len
             length_list.append(cur_len)
         return length_list
+    
+    @staticmethod
+    def extract_spot_name_qa(text):
+        pattern = r'次の(.+?)に関する'
+
+        # 正規表現でマッチング
+        match = re.search(pattern, text)
+        if match:
+            place = match.group(1)
+        return place
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        #print('getitem')
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        id = sources[0]['id']
+        spot_name = id.split('_')[0]
+        if 'qa' in id:
+            tasks = ['QA' for _ in range(len(sources[0]['conversations'])//2)]
+        else:
+            tasks = sources[0].get('task_ids', [])
+            
+        if 'shuffle' in id:
+            start_entities = [LazySupervisedDataset.extract_spot_name_qa(q['value']) for q in sources[0]['conversations'][0::2]]
+        else:
+            start_entities = [spot_name for _ in range(len(tasks))]
+        #print('tasks', tasks)
+        #print('start entities', start_entities
+        prompts = [q['value'] for q in sources[0]['conversations'][0::2]]
+        #print('prompts', prompts)
+            
         if 'image' in sources[0]:
             image_file = self.list_data_dict[i]['image']
             image_folder = self.data_args.image_folder
@@ -772,14 +814,29 @@ class LazySupervisedDataset(Dataset):
                 self.data_args)
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
-        data_dict = preprocess(
-            sources,
-            self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
-        if isinstance(i, int):
-            data_dict = dict(input_ids=data_dict["input_ids"][0],
-                             labels=data_dict["labels"][0])
-
+        
+        #if spot_name not in ['sequential']:
+        #   retrieved_entities = [self.model.get_model().get_retriever().retrieve(prompt, start_entity, task) for prompt, start_entity, task in zip(prompts, start_entities, tasks)]
+            
+        #   print('retrieved_entities', retrieved_entities)
+        #print('start entities', start_entities)
+        #print('retrieve')
+        
+        # data_dict = preprocess(
+        #     sources,
+        #     self.tokenizer,
+        #     has_image=('image' in self.list_data_dict[i]),)
+        #     #retrieved_entities=retrieved_entities)
+        # if isinstance(i, int):
+        #     data_dict = dict(input_ids=data_dict["input_ids"][0],
+        #                      labels=data_dict["labels"][0])
+        # print('sources', sources)
+        data_dict = {}
+        data_dict['sources'] = sources[0]
+        data_dict['tasks'] = tasks
+        data_dict['start_entities'] = start_entities
+        data_dict['prompts'] = prompts
+    
         # image exist in the data
         if 'image' in self.list_data_dict[i]:
             data_dict['image'] = image
@@ -797,23 +854,28 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels = tuple([instance[key] for instance in instances]
-                                  for key in ("input_ids", "labels"))
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids,
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id)
-        labels = torch.nn.utils.rnn.pad_sequence(labels,
-                                                 batch_first=True,
-                                                 padding_value=IGNORE_INDEX)
-        input_ids = input_ids[:, :self.tokenizer.model_max_length]
-        labels = labels[:, :self.tokenizer.model_max_length]
-        batch = dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
-        )
-
+        # input_ids, labels = tuple([instance[key] for instance in instances]
+        #                           for key in ("input_ids", "labels"))
+        # input_ids = torch.nn.utils.rnn.pad_sequence(
+        #     input_ids,
+        #     batch_first=True,
+        #     padding_value=self.tokenizer.pad_token_id)
+        # labels = torch.nn.utils.rnn.pad_sequence(labels,
+        #                                          batch_first=True,
+        #                                          padding_value=IGNORE_INDEX)
+        # input_ids = input_ids[:, :self.tokenizer.model_max_length]
+        # labels = labels[:, :self.tokenizer.model_max_length]
+        # batch = dict(
+        #     input_ids=input_ids,
+        #     labels=labels,
+        #     attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+        # )
+        batch = {}
+        batch['tasks'] = [instance['tasks'] for instance in instances]
+        batch['prompts'] = [instance['prompts'] for instance in instances]
+        batch['sources'] = [instance['sources'] for instance in instances]
+        batch['start_entities'] = [instance['start_entities'] for instance in instances]
+        
         if 'image' in instances[0]:
             images = [instance['image'] for instance in instances]
             if all(x is not None and x.shape == images[0].shape for x in images):
@@ -825,11 +887,13 @@ class DataCollatorForSupervisedDataset(object):
 
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
-                                data_args) -> Dict:
+                                data_args,
+                                model) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
                                 data_path=data_args.data_path,
-                                data_args=data_args)
+                                data_args=data_args,
+                                model=model)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,
@@ -838,6 +902,10 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 
 def train(attn_implementation=None):
     global local_rank
+
+    # if multiprocessing.get_start_method() == 'fork':
+    #     multiprocessing.set_start_method('spawn', force=True)
+    #     print("{} setup done".format(multiprocessing.get_start_method()))
 
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
@@ -875,7 +943,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
         else:
-            model = LlavaLlamaForCausalLM.from_pretrained(
+            model = LlavaRetrieveForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
@@ -899,6 +967,7 @@ def train(attn_implementation=None):
         from peft import prepare_model_for_kbit_training
         model.config.torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
+
 
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
@@ -993,9 +1062,10 @@ def train(attn_implementation=None):
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
-        
-
-
+        #model.retriever = Retriever()
+    model.get_model().initialize_retriever(model_args)
+    retriever = model.get_model().get_retriever()
+    retriever.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
         for name, module in model.named_modules():
@@ -1008,10 +1078,11 @@ def train(attn_implementation=None):
                 if hasattr(module, 'weight'):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
-
+    
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
-                                              data_args=data_args)
+                                              data_args=data_args,
+                                              model=model)
     
     if model_args.resume_from_ckpt:
         non_lora_trainables = torch.load(
@@ -1047,11 +1118,9 @@ def train(attn_implementation=None):
         # parameter_keys = model.named_parameters.keys()
         set_peft_model_state_dict(model, tensors)
         
-    # trainer = LLaVARetrievalTrainer(model=model,
-    #                                 tokenizer=tokenizer,
-    #                                 args=training_args,
-    #                                 **data_module)
-    trainer = LLaVATrainer(model=model,
+    for k,v in model.named_parameters():
+        print(k, v.requires_grad)
+    trainer = LLaVARetrievalTrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)

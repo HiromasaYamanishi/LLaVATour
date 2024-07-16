@@ -37,3 +37,8 @@ serve_images/
 result
 data
 api_key.py
+notebook/
+.env
+checkpoint/
+**.pkl
+lib/
