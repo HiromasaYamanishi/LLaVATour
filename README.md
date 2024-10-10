@@ -5,8 +5,8 @@
 LLaVATour is a large-scale multimodal model specialized for Japanese tourism. It is trained on a dataset collected from Jalan.net, consisting of over 1.3 million entries covering various tasks such as landmark recognition, description generation, and review generation.
 
 <div style="display: flex; justify-content: space-between;">
-    <img src="images/dataset_distribution.png" width="48%" alt="Dataset Distribution">
-    <img src="images/model_architecture.png" width="48%" alt="Model Architecture">
+    <img src="readme_images/task_pie.png" width="48%" alt="Dataset Distribution">
+    <img src="readme_images/llavatour_arch.png" width="48%" alt="Model Architecture">
 </div>
 
 ## Results
@@ -34,30 +34,8 @@ LLaVATour is a large-scale multimodal model specialized for Japanese tourism. It
 
 #### Landmark Recognition
 
-<div style="display: flex; justify-content: space-between;">
-    <div style="width: 48%;">
-        <h4>LLaVA-Tour</h4>
-        <p>Ginzan Onsen in the Snow</p>
-    </div>
-    <div style="width: 48%;">
-        <h4>ChatGPT-4V</h4>
-        <p>Based on the uploaded image, it is evident that this is a traditional Japanese town. However, pinpointing the exact location is difficult. The red bridge visible in the photo is a characteristic feature commonly seen in historical towns such as Gion in Kyoto, Takayama in Gifu, and Kinosaki Onsen in Hyogo.</p>
-    </div>
-</div>
-
-![Landmark Recognition Example](images/landmark_recognition_example.png)
+![Landmark Recognition Example](readme_images/spot_name_prediction_example.png)
 
 #### Review Generation
 
-<div style="display: flex; justify-content: space-between;">
-    <div style="width: 48%;">
-        <h4>LLaVA-Tour</h4>
-        <p>This is the place where the famous Clark statue is located. You can get a panoramic view of Sapporo, so I recommend visiting on a clear day. If you come to Sapporo, you should visit this place at least once.</p>
-    </div>
-    <div style="width: 48%;">
-        <h4>LLaVA-1.5</h4>
-        <p>The statue of the person stands on top of the hill.</p>
-    </div>
-</div>
-
-![Review Generation Example](images/review_generation_example.png)
+![Review Generation Example](readme_images/review_generation_example.png)
