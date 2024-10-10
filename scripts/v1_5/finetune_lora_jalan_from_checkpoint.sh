@@ -1,6 +1,6 @@
 #!/bin/bash
 
-deepspeed --include localhost:0,1,2,3 --master_port 20004 llava/train/train_mem.py\
+deepspeed --include localhost:0,1,2,3,4,5,6,7 --master_port 20004 llava/train/train_mem.py\
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 1e-6 \
     --deepspeed ./scripts/zero3.json \
     --model_name_or_path lmsys/vicuna-13b-v1.5 \
@@ -21,7 +21,7 @@ deepspeed --include localhost:0,1,2,3 --master_port 20004 llava/train/train_mem.
     --bf16 True \
     --output_dir ./checkpoints/llava-v1.5-13b-jalan-review-lora-v15_5epoch \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 24 \
+    --per_device_train_batch_size 10 \
     --per_device_eval_batch_size 4 \
     --gradient_accumulation_steps 1 \
     --evaluation_strategy "no" \

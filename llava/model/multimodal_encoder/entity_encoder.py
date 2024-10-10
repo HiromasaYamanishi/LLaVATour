@@ -8,15 +8,32 @@ from torch_scatter.composite import scatter_softmax
 from torch_scatter import scatter_add, scatter_mean
 import itertools
 
-def convert_to_sequential_with_reset(sequence):
+# def convert_to_sequential_with_reset(sequence):
+#     value_to_seq = {}
+#     current_seq = -1
+#     result = []
+#     last_value = None
+    
+#     for value in sequence:
+#         if value != last_value:
+#             # 値が変わったら、連番をリセット
+#             current_seq += 1
+#             value_to_seq[value] = current_seq
+        
+#         result.append(value_to_seq[value])
+#         last_value = value
+    
+#     return result
+
+def convert_to_sequential_with_reset(sequence, prompt_change_positions):
     value_to_seq = {}
     current_seq = -1
     result = []
     last_value = None
     
-    for value in sequence:
-        if value != last_value:
-            # 値が変わったら、連番をリセット
+    for i, value in enumerate(sequence):
+        if value != last_value or i in prompt_change_positions:
+            # 値が変わったら、または新しいプロンプトの開始位置の場合は連番をリセット
             current_seq += 1
             value_to_seq[value] = current_seq
         
@@ -25,16 +42,29 @@ def convert_to_sequential_with_reset(sequence):
     
     return result
 
+def identify_prompt_change_positions(prompts):
+    prompt_change_positions = set()
+    last_prompt = None
+    for i, prompt in enumerate(prompts):
+        if prompt != last_prompt:
+            prompt_change_positions.add(i)
+            last_prompt = prompt
+    return prompt_change_positions
+
+
 class EntityEncoder(nn.Module):
     def __init__(self):
         super().__init__()
 
         model_name_or_path = "sonoisa/sentence-bert-base-ja-mean-tokens-v2"
         self.tokenizer = BertJapaneseTokenizer.from_pretrained(model_name_or_path)
-        self.model = BertModel.from_pretrained(model_name_or_path)
+        self.model = BertModel.from_pretrained(model_name_or_path).cuda()
         self.model.eval()
-        self.scorer = nn.Linear(768*4, 1)
-        self.count_emb = torch.nn.Embedding(10000, 768)
+        self.scorer = nn.Linear(768*5, 1)
+        self.count_emb = torch.nn.Embedding(1000, 768)
+        self.encode_dim = 768
+        self.entity_projector = torch.nn.Linear(768, 5120)
+        self.relation_projector = torch.nn.Linear(1536, 5120)
         
     def _mean_pooling(self, model_output, attention_mask):
         token_embeddings = model_output[0] #First element of model_output contains all token embeddings
@@ -67,34 +97,42 @@ class EntityEncoder(nn.Module):
         '''
             triplets: [[(neighbor11, relation11, count11, 1), ....(neighbor1N, relation1N, count1N, 1)..(neighborK1, relationK1, countK1, K), ... (neighborKM, relationKM, countKM. K)]
             ...[(neighbor11, relation11, count11, L), ....(neighbor1Q, relation1Q, count1Q, Q)..(neighborL1, relationL1, countL1, L), ... (neighborLP, relationLP, countLP. L)]]
+            3重リスト, batchごとに promptごとにtripletのリスト
         '''
-        if not len(triplets):return torch.empty(0, 768).cuda(), torch.empty(0, 768).cuda(), []
-        len_per_instances = [[len(triplets__) for triplets__ in triplets_] for triplets_ in triplets]
+        # print('triplets', triplets)
         flattened_triplets = list(itertools.chain.from_iterable(itertools.chain.from_iterable(triplets)))
+        if len(flattened_triplets)==0:
+            flattened_triplets = [['なし', 'なし', 'なし', 0, 0, 0]]
+            triplets[0][0].append(['なし', 'なし', 'なし', 0, 0, 0])
+            tasks[0].append('なし')
+            prompts[0].append('なし')
+            #triplets = [[[]]]
+        len_per_instances = [[len(triplets__) for triplets__ in triplets_] for triplets_ in triplets]
+
+        entity_per_prompts = [[max([e[5] for e in triplets__]) + 1 if triplets__ else 0 for triplets__ in triplets_] for triplets_ in triplets]
         tasks = sum(tasks, [])
         prompts = sum(prompts, [])
-        for r in flattened_triplets:
-            if len(r)!=5:
-                print('this is cause', r)
-        print(flattened_triplets)
-        print(tasks)
-        print(prompts)
-        if not all(len(triplet) == 5 for triplet in flattened_triplets):
-            print('bad triplets', flattened_triplets)
-            return torch.empty(0, 768).cuda(), torch.empty(0, 768).cuda(), []
-        entities, neighbors, relations, counts, indices = [r[0] for r in flattened_triplets], [r[1] for r in flattened_triplets], [r[2] for r in flattened_triplets], [r[3] for r in flattened_triplets], [r[4] for r in flattened_triplets]
-        
-        indices = convert_to_sequential_with_reset(indices)
-        entity_embs = self.encode(entities)
-        neighbor_embs = self.encode(neighbors)
-        relation_embs = self.encode(relations)
-        task_embs = self.encode(tasks)      
-        prompt_embs = self.encode(prompts)
+
+        entities, neighbors, relations, counts, prompt_indices, entity_indices = zip(*flattened_triplets)    
+        prompt_change_positions = identify_prompt_change_positions(prompt_indices)
+
+        prompt_indices = convert_to_sequential_with_reset(prompt_indices, prompt_change_positions)
+        entity_indices = convert_to_sequential_with_reset(entity_indices, prompt_change_positions)
+
+        entity_embs = self.encode(entities).to(torch.bfloat16)
+        neighbor_embs = self.encode(neighbors).to(torch.bfloat16)
+        relation_embs = self.encode(relations).to(torch.bfloat16)
+        task_embs = self.encode(tasks).to(torch.bfloat16) 
+        prompt_embs = self.encode(prompts).to(torch.bfloat16)
+        prompt_embs = torch.stack([prompt_embs[i] for i in prompt_indices])
         count_embs = self.count_emb(torch.tensor(counts).cuda())
-        score = self.scorer(torch.cat([prompt_embs.cuda(), entity_embs.cuda(), neighbor_embs.cuda(), relation_embs.cuda()*count_embs.cuda()]).to(torch.bfloat16))  
-        score = scatter_softmax(score, torch.tensor(indices).cuda())
-        relation_embs = scatter_add(relation_embs*count_embs, torch.tensor(indices).cuda())
-        entity_embs = scatter_mean(entity_embs, torch.tensor(indices).cuda())
-        assert len(relation_embs) == len(entity_embs) == sum([len(i) for i in len_per_instances])
-        
-        return relation_embs, entity_embs, len_per_instances
+        print('count_embs', count_embs)
+        score = self.scorer(torch.cat([prompt_embs.cuda(), entity_embs.cuda(), neighbor_embs.cuda(), relation_embs.cuda(), count_embs.cuda()], dim=1).to(torch.bfloat16))  
+        score = scatter_softmax(score.squeeze(1), torch.tensor(entity_indices).cuda())
+        relation_embs = scatter_add(torch.cat([relation_embs.cuda(), count_embs.cuda()], dim=1)*score.unsqueeze(1).cuda(), torch.tensor(entity_indices).unsqueeze(1).cuda(), dim=0)
+        entity_embs = scatter_mean(entity_embs.cuda(), torch.tensor(entity_indices).unsqueeze(1).cuda(), dim=0)
+        #assert len(relation_embs) == len(entity_embs) == sum([len(i) for i in len_per_instances])
+        # print('relation_emb', relation_embs.shape, entity_embs.shape,entity_indices,  entity_per_prompts, len_per_instances)
+        relation_embs = self.relation_projector(relation_embs)
+        entity_embs = self.entity_projector(entity_embs)
+        return relation_embs, entity_embs, entity_per_prompts, len_per_instances

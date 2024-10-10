@@ -1,11 +1,11 @@
 #!/bin/bash
 
-deepspeed --include localhost:0,1,2,3,4,5,6,7 --master_port 20005 llava/train/train_mem.py\
+deepspeed --include localhost:0,1,2,4 --master_port 20005 llava/train/train_mem.py\
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --deepspeed ./scripts/zero3.json \
     --model_name_or_path lmsys/vicuna-13b-v1.5 \
     --version v1 \
-    --data_path ./playground/data/v11/train.json \
+    --data_path ./playground/data/v36/train.json \
     --image_folder /home/yamanishi/project/trip_recommend/data/jalan_image_with_caption \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --pretrain_mm_mlp_adapter ./checkpoints/llava-v1.5-mlp2x-336px-pretrain-vicuna-13b-v1.5/mm_projector.bin \
@@ -16,11 +16,11 @@ deepspeed --include localhost:0,1,2,3,4,5,6,7 --master_port 20005 llava/train/tr
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/llava-v1.5-13b-jalan-review-lora-v11 \
+    --output_dir ./checkpoints/llava-v1.5-13b-jalan-review-lora-v36 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 14 \
+    --per_device_train_batch_size 10 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \

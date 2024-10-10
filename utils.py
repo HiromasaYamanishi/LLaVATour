@@ -2,6 +2,14 @@ import pickle
 import json
 import plotly.graph_objs as go
 #import umap
+import math
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+import torchvision.transforms as transforms
+import cv2
 
 color_names = """aliceblue, maroon, aqua, aquamarine, azure,
             ivory, bisque, black, lightyellow, blue,
@@ -162,3 +170,154 @@ def unique_preserve_order(input_list):
             seen.add(item)
             result.append(item)
     return result
+
+import numpy as np
+import math
+
+
+def dpp(kernel_matrix, max_length, epsilon=1E-10):
+    """
+    Our proposed fast implementation of the greedy algorithm
+    :param kernel_matrix: 2-d array
+    :param max_length: positive int
+    :param epsilon: small positive scalar
+    :return: list
+    """
+    item_size = kernel_matrix.shape[0]
+    cis = np.zeros((max_length, item_size))
+    di2s = np.copy(np.diag(kernel_matrix))
+    selected_items = list()
+    selected_item = np.argmax(di2s)
+    selected_items.append(selected_item)
+    while len(selected_items) < max_length:
+        k = len(selected_items) - 1
+        ci_optimal = cis[:k, selected_item]
+        di_optimal = math.sqrt(di2s[selected_item])
+        elements = kernel_matrix[selected_item, :]
+        eis = (elements - np.dot(ci_optimal, cis[:k, :])) / di_optimal
+        cis[k, :] = eis
+        di2s -= np.square(eis)
+        di2s[selected_item] = -np.inf
+        selected_item = np.argmax(di2s)
+        if di2s[selected_item] < epsilon:
+            break
+        selected_items.append(selected_item)
+    return selected_items
+
+
+def dpp_sw(kernel_matrix, window_size, max_length, epsilon=1E-10):
+    """
+    Sliding window version of the greedy algorithm
+    :param kernel_matrix: 2-d array
+    :param window_size: positive int
+    :param max_length: positive int
+    :param epsilon: small positive scalar
+    :return: list
+    """
+    item_size = kernel_matrix.shape[0]
+    v = np.zeros((max_length, max_length))
+    cis = np.zeros((max_length, item_size))
+    di2s = np.copy(np.diag(kernel_matrix))
+    selected_items = list()
+    selected_item = np.argmax(di2s)
+    selected_items.append(selected_item)
+    window_left_index = 0
+    while len(selected_items) < max_length:
+        k = len(selected_items) - 1
+        ci_optimal = cis[window_left_index:k, selected_item]
+        di_optimal = math.sqrt(di2s[selected_item])
+        v[k, window_left_index:k] = ci_optimal
+        v[k, k] = di_optimal
+        elements = kernel_matrix[selected_item, :]
+        eis = (elements - np.dot(ci_optimal, cis[window_left_index:k, :])) / di_optimal
+        cis[k, :] = eis
+        di2s -= np.square(eis)
+        if len(selected_items) >= window_size:
+            window_left_index += 1
+            for ind in range(window_left_index, k + 1):
+                t = math.sqrt(v[ind, ind] ** 2 + v[ind, window_left_index - 1] ** 2)
+                c = t / v[ind, ind]
+                s = v[ind, window_left_index - 1] / v[ind, ind]
+                v[ind, ind] = t
+                v[ind + 1:k + 1, ind] += s * v[ind + 1:k + 1, window_left_index - 1]
+                v[ind + 1:k + 1, ind] /= c
+                v[ind + 1:k + 1, window_left_index - 1] *= c
+                v[ind + 1:k + 1, window_left_index - 1] -= s * v[ind + 1:k + 1, ind]
+                cis[ind, :] += s * cis[window_left_index - 1, :]
+                cis[ind, :] /= c
+                cis[window_left_index - 1, :] *= c
+                cis[window_left_index - 1, :] -= s * cis[ind, :]
+            di2s += np.square(cis[window_left_index - 1, :])
+        di2s[selected_item] = -np.inf
+        selected_item = np.argmax(di2s)
+        if di2s[selected_item] < epsilon:
+            break
+        selected_items.append(selected_item)
+    return selected_items
+
+def overlay_attention(image_path, attention_map, output_path):
+    # 画像を読み込み
+    image = Image.open(image_path).convert("RGB")
+
+    # 画像をテンソルに変換
+    transform = transforms.ToTensor()
+    image_tensor = transform(image)
+
+    # アテンションマップを正規化
+    attention_map = attention_map.detach().cpu().numpy()
+    attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min())
+    #print('attention map', attention_map)
+    # アテンションマップをリサイズして、元の画像と同じサイズにする
+    #print(attention_map.shape, (image_tensor.shape[2], image_tensor.shape[1]))
+    attention_map = attention_map.astype(np.float32) 
+    attention_map_resized = cv2.resize(attention_map, (image_tensor.shape[2], image_tensor.shape[1]))
+    
+    # アテンションマップをガウシアンブラーで滑らかにする
+    #attention_map_resized = cv2.GaussianBlur(attention_map_resized, (11, 11), 0)
+
+    # アテンションマップをカラー化
+    cmap = plt.get_cmap("jet")
+    attention_map_colored = cmap(attention_map_resized)
+    attention_map_colored = np.delete(attention_map_colored, 3, 2)  # alphaチャネルを削除
+
+    # オーバーレイのために元の画像とアテンションマップを合成
+    overlay = (0.3 * np.array(image) / 255.0) + (0.7 * attention_map_colored)
+    overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min())
+    overlay = (overlay * 255).astype(np.uint8)
+
+    # オーバーレイ画像を保存
+    overlay_image = Image.fromarray(overlay)
+    overlay_image.save(output_path)
+
+
+def overlay_attention_(image_path, attention_map, output_path):
+    # 画像を読み込み
+    image = Image.open(image_path).convert("RGB")
+
+    # 画像をテンソルに変換
+    transform = transforms.ToTensor()
+    image_tensor = transform(image)
+
+    # アテンションマップを正規化
+    attention_map = attention_map.detach().cpu().numpy()
+    # attention_map = np.log10(attention_map)
+    attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min())
+    # print(attention_map.shape)
+    # アテンションマップをリサイズして、元の画像と同じサイズにする
+    attention_map_resized = Image.fromarray((attention_map * 255).astype(np.uint8))
+    attention_map_resized = attention_map_resized.resize((image_tensor.shape[2], image_tensor.shape[1]), resample=Image.BILINEAR)
+    attention_map_resized = np.array(attention_map_resized) / 255.0
+    #attention_map_resized = cv2.GaussianBlur(attention_map_resized, (11, 11), 0)
+    # アテンションマップをカラー化
+    cmap = plt.get_cmap("jet")
+    attention_map_colored = cmap(attention_map_resized)
+    attention_map_colored = np.delete(attention_map_colored, 3, 2)  # alphaチャネルを削除
+
+    # オーバーレイのために元の画像とアテンションマップを合成
+    overlay = (0.6 * np.array(image) / 255.0) + (0.4 * attention_map_colored)
+    overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min())
+    overlay = (overlay * 255).astype(np.uint8)
+
+    overlay_image = Image.fromarray(overlay)
+    overlay_image.save(output_path)
+

@@ -42,3 +42,5 @@ notebook/
 checkpoint/
 **.pkl
 lib/
+*.whl
+*.sh

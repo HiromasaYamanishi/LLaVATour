@@ -771,20 +771,25 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+
+        prompts = [q['value'] for q in sources[0]['conversations'][0::2]]
         id = sources[0]['id']
         spot_name = id.split('_')[0]
         if 'qa' in id:
             tasks = ['QA' for _ in range(len(sources[0]['conversations'])//2)]
         else:
             tasks = sources[0].get('task_ids', [])
+
+        if not len(tasks):
+            tasks = ['unknown' for _ in range(len(prompts))]
             
         if 'shuffle' in id:
             start_entities = [LazySupervisedDataset.extract_spot_name_qa(q['value']) for q in sources[0]['conversations'][0::2]]
         else:
             start_entities = [spot_name for _ in range(len(tasks))]
+
         #print('tasks', tasks)
         #print('start entities', start_entities
-        prompts = [q['value'] for q in sources[0]['conversations'][0::2]]
         #print('prompts', prompts)
             
         if 'image' in sources[0]:

@@ -70,6 +70,7 @@ class CLIP:
         self.processor = AutoImageProcessor.from_pretrained(model_path)
         self.model.eval()
 
+
     def get_text_features(self, texts: List[str], batch_size=200):
         text_feature_all = []
         for i in range((len(texts) - 1) // batch_size + 1):
@@ -114,7 +115,7 @@ class CLIP:
         max_inds = np.array(max_inds.cpu())
         return [texts[max_ind] for max_ind in max_inds]
 
-    def retrieve_text_from_image_topk(self, images: List[str], texts: List[str], k=3):
+    def retrieve_text_from_image_topk(self, images: List[str], texts: List[str], topk=3):
         """
         images内の各imageに対して最も近いtextをtextsから取ってくる
         """
@@ -122,11 +123,12 @@ class CLIP:
         image_features = self.get_image_features(images)
         text_features = self.get_text_features(texts)
         text_probs = (image_features @ text_features.T).softmax(dim=-1)
-        max_inds = torch.flatten(torch.topk(text_probs, dim=1, k=k).indices)
+        topk = min(topk, text_probs.size(1))
+        max_inds = torch.flatten(torch.topk(text_probs, dim=1, k=topk).indices)
         max_inds = np.array(max_inds.cpu())
         return [texts[max_ind] for max_ind in max_inds]
 
-    def retrieve_image_from_text_topk(self, images: List[str], texts: List[str], k=3):
+    def retrieve_image_from_text_topk(self, images: List[str], texts: List[str], topk=3):
         """
         images内の各imageに対して最も近いtextをtextsから取ってくる
         """
@@ -134,7 +136,7 @@ class CLIP:
         image_features = self.get_image_features(images)
         text_features = self.get_text_features(texts)
         image_probs = (text_features @ image_features.T).softmax(dim=-1)
-        max_inds = torch.flatten(torch.topk(image_probs, dim=1, k=k).indices)
+        max_inds = torch.flatten(torch.topk(image_probs, dim=1, k=topk).indices)
         max_inds = np.array(max_inds.cpu())
         return [images[max_ind] for max_ind in max_inds]
 

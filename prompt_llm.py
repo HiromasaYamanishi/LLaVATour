@@ -8,12 +8,13 @@ from typing import List
 
 import fire
 import pandas as pd
-from lmm import GPT3, AoKarasu, AoKarasuTransformer, LLaMA, Qarasu, QarasuTransformer, ElyzaLLama3AWQ, ElyzaLLama3, Calm3
+from llm import AoKarasu, AoKarasuTransformer, LLaMA, Qarasu, QarasuTransformer, ElyzaLLama3AWQ, ElyzaLLama3, Calm3, Gemma2, Phi3, SentenceBertJapanese
 from prompt import *
 from tqdm import tqdm
 import random
 from utils import *
-
+import argparse
+from sklearn.metrics.pairwise import cosine_similarity
 
 class Summarizer:
     def __init__(self, model_name, tensor_parallel_size=4):
@@ -45,7 +46,21 @@ class Summarizer:
             self.model = ElyzaLLama3AWQ(tensor_parallel_size=tensor_parallel_size)
         elif model_name == "calm3":
             self.model = Calm3(tensor_parallel_size=tensor_parallel_size)
+        elif model_name == 'gemma2':
+            self.model = Gemma2(tensor_parallel_size=tensor_parallel_size)
+        elif model_name == 'phi3':
+            self.model = Phi3(tensor_parallel_size=tensor_parallel_size)
             
+    def parse_rec_result(
+            self,
+            df_path
+    ):
+        df = pd.read_csv(df_path)
+        prompts = [prompt_rec_parse.format(response=response) for response in df['response']]
+        parsed_response = self.model.generate(prompts)
+        df['parsed_response'] = parsed_response
+        df.to_csv(df_path)
+
     def summarize_review_user(
         self,
         max_num=20000,
@@ -151,58 +166,231 @@ class Summarizer:
         )
         return generated_topics
 
-    def get_item_pos_summary_all(
-        self,
+    def summarize_review_diversity_sample(self, test=False, chunk=None, prompt_type='normal'):
+        # sbert = SentenceBertJapanese()
+        with open('./playground/data/v4/train.json') as f:
+            train = json.load(f)
+        spots = set()
+        for d in train:
+            id = d['id']
+            spots.add(id.split('_')[0])
+        df_review = pd.read_pickle(
+            "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
+        )
+        model = self.model
+        spot2review = defaultdict(list)
+        test_reviews = pd.read_csv('./data/df_review_feature_eval.csv')
+        for spot, review in zip(df_review['spot'], df_review['review']):
+            if spot not in spots:continue
+            if review in test_reviews:continue
+            spot2review[spot].append(review)
+
+        prompts, spots = [], []
+        spots_unique = list(spot2review.keys())
+        ls = len(spots_unique)
+        chunk_num = ls//3
+        spot_pre = spots_unique[:chunk_num]
+        spot_middle = spots_unique[chunk_num:chunk_num*2]
+        spot_post = spots_unique[chunk_num*2:]
+        if chunk is None:
+            spots_unique = spots_unique
+        elif chunk == 'pre':
+            spots_unique = spot_pre
+        elif chunk == 'middle':
+            spots_unique = spot_middle
+        elif chunk == 'post':
+            spots_unique = spot_post
+        print(spots_unique[:5])
+        for spot in spots_unique:
+            reviews = spot2review[spot]
+            # review_emb = sbert.encode(reviews)
+
+            # kernel_matrix = cosine_similarity(review_emb, review_emb)
+            # chosen_inds = dpp_sw(kernel_matrix, window_size=100, max_length=50, epsilon=1E-10)
+            # chosen_reviews = [reviews[ind] for ind in chosen_inds]
+            if len(reviews)>200:
+                reviews = [r for r in reviews if len(r)>40]
+            chosen_reviews = random.sample(reviews, min(len(reviews), 50))
+            reviews_summary = ''
+            for review in chosen_reviews:
+                reviews_summary+=review
+                reviews_summary+='\n'
+                if len(reviews_summary)>4900:
+                    break
+            #chosen_reviews = '\n'.join(chosen_reviews)
+            if prompt_type=='normal':
+                prompt_tmp = prompt_summary_review[:]
+            elif prompt_type == 'improved':
+                prompt_tmp = prompt_summary_improved[:]
+            elif prompt_type == 're':
+                prompt_tmp = prompt_summary_review_re[:]
+            prompts.append(prompt_tmp.format(reviews=reviews_summary))
+            spots.append(spot)
+        if test:
+            prompts = prompts[:5]
+            spots = spots[:5]
+        outputs = model.generate(prompts)
+        if test:
+            print(outputs)
+        pd.DataFrame({'spot': spots, 'output': outputs}).to_csv(f'./data/spot_review_summary_diverse_re_{chunk}_{prompt_type}.csv')
+
+    def summarize_review_all(
+        self, test=False,
+    ):
+        with open('./playground/data/v4/train.json') as f:
+            train = json.load(f)
+        spots = set()
+        for id in train['id']:
+            spots.add(id.split('_')[0])
+        df_review = pd.read_pickle(
+            "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
+        )
+        spot2review = defaultdict(list)
+        test_reviews = pd.read_csv('../data/df_review_feature_eval.csv')
+        for spot, review in zip(df_review['spot'], df_review['review']):
+            if spot not in spots:continue
+            if review in test_reviews:continue
+            spot2review[spot].append(review)
+
+        prompts, spots = [], []
+        for spot in spot2review.keys():
+            reviews = spot2review[spot]
+            prompt_tmp = prompt_summary_all[:]
+            for i,review in enumerate(reviews):
+                if i==500:break
+                prompt_sumary_all+=f'レビュー{i}:' + review
+            prompts.append(prompt_summary_all)
+            spots.append(spot)
+
+        if test:
+            prompts = prompts[:5]
+            spots = spots[:5]
+
+        pd.DataFrame({'spot': spots, 'prompt': prompts}).to_csv('./data/spot_summary_all.csv')
+        pass
+        
+    def get_user_profile(
+            self, max_review_num=40, test=False, prompt_type='short'
+    ):
+        train_df = pd.read_csv('./data/dataset_personalize/train.csv')
+        test_df = pd.read_csv('./data/dataset_personalize/test.csv')
+        test_urls = set(list(test_df['url'].values))
+        urls, prompts = [], []
+        for i, (url, group) in tqdm(enumerate(train_df.groupby('url'))):
+            if url in test_urls:
+                review_tmp = group['review'].values[:max_review_num]
+                visit_time_tmp = group['visit_time'].values[:max_review_num]
+                pref_tmp = group['visit_time'].values[:max_review_num]
+                review_user = ''
+                for review, visit_time, pref in zip(review_tmp, visit_time_tmp, pref_tmp):
+                    review_user+=review
+                    review_user+=f'(訪問日: {visit_time}, 都道府県: {pref})'
+                    review_user+='\n'
+                urls.append(url)
+                if prompt_type=='short':
+                    prompt_tmp = prompt_user_profile_short[:]
+                elif prompt_type == 'detail':
+                    prompt_tmp = prompt_user_profile[:]
+                prompts.append(prompt_tmp.format(reviews='\n'.join(review_tmp)))
+            if test:
+                if len(prompts)==5:break
+        #print('prompts', prompts)
+        outputs = self.model.generate(prompts)
+        pd.DataFrame({'url': urls, 'profile': outputs}).to_csv(f'./data/dataset_personalize/user_profile_{prompt_type}.csv')
+
+    def get_user_profile_short_for_review(
+            self, max_review_num=40, test=False, prompt_type='short', train_df_path='./data/seq_rec/review.csv'
+    ):
+        # train_df = pd.read_csv('./data/dataset_personalize/review_train.csv')
+        train_df = pd.read_csv(train_df_path)
+        with open('./data/dataset_personalize/train_url.pkl', 'rb') as f:
+            train_urls = pickle.load(f)
+        urls, prompts = [], []
+        #df_urls = pd.read_csv('./data/inference_review_attribute_all.csv')
+        for i, (url, group) in tqdm(enumerate(train_df.groupby('url'))):
+        #for i,url in enumerate(df_urls['url']):
+            #if url not in train_urls or len(group)<3:continue
+            #group = train_df[train_df['url']==url]
+            review_tmp = group['review'].values[:max_review_num]
+            visit_time_tmp = group['visit_time'].values[:max_review_num]
+            pref_tmp = group['pref'].values[:max_review_num]
+            review_user = ''
+            for review, visit_time, pref in zip(review_tmp, visit_time_tmp, pref_tmp):
+                review_user+=review
+                review_user+=f'(訪問日: {visit_time}, 都道府県: {pref})'
+                review_user+='\n'
+            urls.append(url)
+            if prompt_type=='tag':
+                prompt_tmp = prompt_user_profile_tag[:]
+            elif prompt_type == 'sent':
+                prompt_tmp = prompt_user_profile_sent[:]
+            prompts.append(prompt_tmp.format(reviews='\n'.join(review_tmp)))
+            if test:
+                if len(prompts)==5:break
+        print('prompts', len(prompts))
+        outputs = self.model.generate(prompts)
+        if test:
+            print('outputs', outputs)
+        #pd.DataFrame({'url': urls, 'profile': outputs}).to_csv(f'./data/dataset_personalize/user_profile_{prompt_type}_test.csv')
+        pd.DataFrame({'url': urls, 'profile': outputs}).to_csv(f'./data/seq_rec/user_profile_{prompt_type}.csv')
+
+    def get_item_summary_all(
+        self, dict_path, save_path, mode='pos', test=False, chunk_num=200
     ):
         llm = self.model
-        pos_dict = load_pkl("./preprocess/recommend/pos_dict.pkl")
+        # pos_dict = load_pkl("./preprocess/recommend/pos_dict.pkl")
+        pos_dict = load_pkl(dict_path)
         spots, prompt_all = [], []
+        prompt_length = []
         for spot in tqdm(pos_dict.keys()):
-            pos_topic = pos_dict[spot][:100]
-            prompt_tmp = prompt_topic_summary[:]
-            for topic in pos_topic:
-                prompt_tmp += topic
-                prompt_tmp += "\n"
-            prompt_all.append(prompt_tmp)
-            spots.append(spot)
-        # print('prompt_all', prompt_all[:2])
+            for i in range(min(math.ceil(len(pos_dict[spot])/chunk_num), 5)):
+                pos_topic = pos_dict[spot][chunk_num*i:chunk_num*(i+1)]
+                if mode=='pos':
+                    prompt_tmp = prompt_topic_summary[:]
+                else:
+                    prompt_tmp = prompt_topic_summary_neg[:]
+                for topic in pos_topic:
+                    prompt_tmp += topic
+                    prompt_tmp += "\n"
+                prompt_length.append(len(prompt_tmp))
+                prompt_all.append(prompt_tmp)
+                spots.append(spot)
+        prompt_length = sorted(prompt_length, reverse=True)
+        print(prompt_length[:20])
+        if test:
+            prompt_all = prompt_all[:10]
+            spots = spots[:10]
         outputs = llm.generate(prompt_all)
         # spots = spots[10:13]
-        # print(outputs)
-        with open("./preprocess/recommend/item_pos_summary_karasu.pkl", "wb") as f:
+        if test:
+            print(outputs[:5])
+        with open(save_path + '.pkl', 'wb') as f:
             pickle.dump(outputs, f)
 
-        df = pd.DataFrame({"spot": spots, "pos_summary": outputs})
-        df.to_csv("./preprocess/recommend/pos_summary_karasu.csv")
-
-    def get_item_neg_summary_all(
-        self,
-    ):
-        llm = self.model
-        pos_dict = load_pkl("./preprocess/recommend/neg_dict.pkl")
-        spots, prompt_all = [], []
-        # if os.path.exists(f'./preprocess/recommend/neg_summary{start_ind}_{end_ind}.csv'):
-        #   already_spots = pd.read_csv(f'./preprocess/recommend/neg_summary{start_ind}_{end_ind}.csv', names=['spot', 'summary'])['spot'].values
-        # else:already_spots=[]
-        for spot in tqdm(pos_dict.keys()):
-            # if spot in already_spots:continue
-            pos_topic = pos_dict[spot][:100]
-            prompt_tmp = prompt_topic_summary_neg[:]
-            for topic in pos_topic:
-                prompt_tmp += topic
-                prompt_tmp += "\n"
-            prompt_all.append(prompt_tmp)
-            spots.append(spot)
-        # print('prompt_all', prompt_all[:2])
-        outputs = llm.generate(prompt_all)
-        # outputs = llm.generate_and_save(prompt_all[start_ind:end_ind], spots, start_ind, end_ind)
-        # spots = spots[10:13]
-        # print(outputs)
-        # with open('./preprocess/recommend/item_neg_summary3000以降.pkl', 'wb') as f:
+        #with open("./preprocess/recommend/item_pos_summary_karasu.pkl", "wb") as f:
         #    pickle.dump(outputs, f)
 
-        df = pd.DataFrame({"spot": spots, "neg_summary": outputs})
-        df.to_csv("./preprocess/recommend/neg_summary_karasu.csv")
+        df = pd.DataFrame({"spot": spots, "summary": outputs})
+        df.to_csv(save_path + '.csv')
+        #df.to_csv("./preprocess/recommend/pos_summary_karasu.csv")
+
+    def reduce_noise_summary(self, df_path):
+        llm = self.model
+        # pos_dict = load_pkl("./preprocess/recommend/pos_dict.pkl")
+        df = pd.read_csv(df_path)
+        prompts = []
+        for i,summary in enumerate(df['summary']):
+            prompt_tmp = prompt_summary_clean[:]
+            prompts.append(prompt_tmp.format(sentence=summary))
+        # print('prompt_all', prompt_all[:2])
+        print(len(prompts))
+        #prompt_all = prompt_all[:5]
+        #spots = spots[:5]
+        outputs = llm.generate(prompts)
+
+        df['output_clean'] = outputs
+        df.to_csv(df_path)
+
 
     def get_1st_step_output(self, llm, reviews):
         prompt_step1 = prompt_direct_step1
@@ -657,8 +845,9 @@ class Summarizer:
             elif prompt_type == 'marketing':
                 prompt = make_marketing_prompt(row)
             prompts.append(prompt)
-        print(prompts[:5])
+        #print(prompts[:5])
         outputs = self.model.generate(prompts)
+        # print(outpus[:5])
         df_review['output'] = outputs
         df_review.to_csv(f'./data/{prompt_type}_{self.model_name}.csv')
         # pass
@@ -715,7 +904,14 @@ class Summarizer:
         # df.to_csv(f'./data/p5/data/{dataset}/{type}_summary.csv')
         print("savepath", f"./data/p5/data/{dataset}/{type}_summary_{prompt_type}.csv")
         df.to_csv(f"./data/p5/data/{dataset}/{type}_summary_{prompt_type}.csv")
-        
+
+    def extract_noun_adj_japanese(self):
+        df_review_pred = pd.read_csv('./data/df_review_7review.csv')
+        prompts = [prompt_noun_adj_jp.format(review=review) for review in tqdm(df_review_pred['pred'])]
+        outputs = self.model.generate(prompts)
+        df_review_pred['output'] = outputs
+        df_review_pred.to_csv('./data/df_review_7review.csv')
+
     def extract_fos_japanese(self, ):
         df_review = pd.read_pickle(
             "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
@@ -756,6 +952,26 @@ class Summarizer:
             pd.DataFrame(
                 {"item": user_or_items, "ind": inds, "summary": outputs}
             ).to_csv(save_path)
+
+    def extract_aspect_sequence(self):
+        df = pd.read_csv('../mrg/data/train.csv')
+        #if index==0:
+        reviews = df['review'].unique()[280000:]
+        prompts = [prompt_aspect_sequence.format(review=review) for review in reviews]
+        results = self.model.generate(prompts)
+        pd.DataFrame({'review': reviews, 'aspect_sequence': results}).to_csv('./data/aspect_sequece2.csv')
+
+    def extract_sketch(self):
+        aspect_sequence1 = pd.read_csv('./data/aspect_sequece1.csv')
+        aspect_sequence2 = pd.read_csv('./data/aspect_sequece2.csv')
+        aspect_sequence = pd.concat([aspect_sequence1, aspect_sequence2]).reset_index()
+        review2seq = {review:seq for review,seq in zip(aspect_sequence['review'], aspect_sequence['aspect_sequence'])}
+        df = pd.read_csv('../mrg/data/train.csv')
+        #if index==0:
+        reviews = df['review'].unique()
+        prompts = [prompt_sketch.format(review=review, aspect=review2seq[review]) for review in reviews]
+        results = self.model.generate(prompts)
+        pd.DataFrame({'review': reviews, 'aspect_sequence': results}).to_csv('./data/sketch.csv')
 
     def summarize_aspect_tripadvisor(self):
         (
@@ -840,7 +1056,53 @@ class Summarizer:
 
 if __name__ == "__main__":
     #summarizer = Summarizer('AoKarasu-4B', tensor_parallel_size=4)
-    summarizer = Summarizer('calm3', tensor_parallel_size=4)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model',)
+    parser.add_argument('--polarity', type=str, default='pos')
+    parser.add_argument('--chunk', type=str, default=None)
+    parser.add_argument('--test', action='store_true')
+    parser.add_argument('--prompt_type', type=str, default='normal')
+    parser.add_argument('--tensor_parallel_size', type=int, default=2)
+    parser.add_argument('--df_path', type=str)
+    args = parser.parse_args()
+    
+    summarizer = Summarizer(args.model, tensor_parallel_size=args.tensor_parallel_size)
+    # summarizer.extract_aspect_sequence()
+    summarizer.extract_sketch()
+    exit()
+    summarizer.summarize_review_diversity_sample(False, chunk=None, prompt_type='re')
+    exit()
+    summarizer.extract_sketch()
+    summarizer.parse_rec_result(args.df_path)
+    exit()
+    summarizer.parse_rec_result('/home/yamanishi/project/airport/src/analysis/route_recommendation/result/gpt4o/v9.csv')
+    #summarizer.get_user_profile_short_for_review(test=args.test, prompt_type=args.prompt_type)
+    # summarizer.extract_noun_adj_japanese()
+    exit()
+    summarizer.get_user_profile_short_for_review(test=args.test, prompt_type=args.prompt_type)
+    #summarizer.extract_noun_adj_japanese()
+    #summarizer.summarize_review_diversity_sample(test=args.test, chunk=args.chunk, prompt_type=args.prompt_type)
+    # summarizer.summarize_review_all()
+    # exit()
+    exit()
+    polarity = args.polarity
+    summarizer.get_item_summary_all(dict_path=f'./data/{polarity}_dict_spot.pkl',
+                                         save_path=f'./data/{polarity}_spot_summary_{args.model}_again',
+                                         test=False,
+                                         mode=polarity)
+    exit()
+    summarizer.get_item_summary_all(dict_path='./data/neg_dict_spot.pkl',
+                                         save_path=f'./data/neg_spot_summary_{args.model}_again',
+                                         test=False,
+                                         mode='neg')
+    # summarizer.reduce_noise_summary(df_path='./data/pos_spot_summary_calm.csv')
+    #exit()
+    # summarizer.get_item_summary_all(dict_path='./data/pos_dict_spot.pkl',
+    #                                     save_path='./data/pos_spot_summary_calm_again',
+    #                                     mode='pos')
+    # exit()
+    #summarizer.extract_noun_adj_japanese()
+    exit()
     ind=2
     summarizer.convert(review_start=0, review_end=250000, prompt_type='search')
     exit()

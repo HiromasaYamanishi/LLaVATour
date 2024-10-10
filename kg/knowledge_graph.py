@@ -19,17 +19,18 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 
-class SAKG:
+
+class SAKGOld:
     def __init__(self, load=False):
         
-        self.graph_path = './data/kg/sakg.pkl'
+        self.graph_path = '../data/kg/sakg_0724.pkl'
         if load:
             self.load_graph()
         else:
             self.df_review = pd.read_pickle(
                 "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
             )
-            with open('./data/pairs.pkl', 'rb') as f:
+            with open('../data/pairs.pkl', 'rb') as f:
                 pairs = pickle.load(f)
                 
             le_user = LabelEncoder()
@@ -47,8 +48,11 @@ class SAKG:
             self.save_graph()
 
     def build_graph(self):
+        test_reviews = pd.read_csv('../data/df_review_feature_eval.csv')['conversations'].values
+        print(test_reviews)
         for i, row in tqdm(self.df_review.iterrows()):
             user_id, spot, pairs, review = row['user_id'], row['spot'], row['pairs'], row['review']
+            if review in test_reviews:continue
             user_node = 'user_' + str(user_id)
             # ノードカテゴリを追加
             self.graph.add_node(user_node, category='user')
@@ -59,13 +63,13 @@ class SAKG:
                 self._add_edge_with_count(spot, noun, adj)
             #if i==100000:break
             
-    def clean_up_edges(self):
+    def clean_up_edges(self, count_thresh=3):
         for node in self.graph.nodes:
             if self.graph.nodes[node].get('category') == 'spot':
                 edges_to_remove = []
                 for neighbor in self.graph.neighbors(node):
                     relations = self.graph[node][neighbor]['relations']
-                    relations_to_remove = [rel for rel, count in relations.items() if count < 5]
+                    relations_to_remove = [rel for rel, count in relations.items() if count < count_thresh]
                     for rel in relations_to_remove:
                         del relations[rel]
                     if not relations:
@@ -81,11 +85,11 @@ class SAKG:
         else:
             self.graph[node1][node2]['relations'][relation] = 1
 
-    def save_graph(self,):
-        with open(self.graph_path, 'wb') as f:
+    def save_graph(self, graph_path):
+        with open(graph_path, 'wb') as f:
             pickle.dump(self.graph, f)
         # nx.write_gml(self.graph, self.graph_path)
-        print(f"Graph saved to {self.graph_path}")
+        print(f"Graph saved to {graph_path}")
         
     def load_graph(self):
         with open(self.graph_path, 'rb') as f:
@@ -121,17 +125,17 @@ class SAKG:
             edge['color'] = 'red'
         
         # グラフを HTML ファイルとして保存
-        net.show("./data/kg/sakg.html")
+        net.show("../data/kg/sakg.html")
         # pyvis_G = Network()
         # pyvis_G.from_nx(self.graph)
-        # pyvis_G.show("./data/kg/sakg.html")
+        # pyvis_G.show("../data/kg/sakg.html")
         # ノードの描画
         #nx.draw(subgraph, pos, with_labels=True, node_size=500, node_color='skyblue', font_size=10,font_family='Hiragino Sans',  font_weight='bold')
         
         # エッジのラベルの描画
         #nx.draw_networkx_edge_labels(subgraph, pos, edge_labels=edge_labels, font_color='red',font_family='Hiragino Sans', font_size=8)
         
-        #plt.savefig('./data/kg/sakg.jpg')
+        #plt.savefig('../data/kg/sakg.jpg')
 
     def get_graph_statistics(self):
         stats = {
@@ -195,11 +199,11 @@ class SAKG:
             print()
             
     def get_embedding_prompt(self, split=1):
-        all_prompt_df = pd.read_csv('./data/all_prompts.csv')
+        all_prompt_df = pd.read_csv('../data/all_prompts.csv')
         sbert = SentenceBertJapanese()
         chunk_size = len(all_prompt_df)//3 + 1
         prompt_emb = sbert.encode(all_prompt_df['prompt'][chunk_size*(split-1):chunk_size*(split)], batch_size=100)
-        with open(f'./data/all_prompt_emb_{split}.pkl', 'wb') as f:
+        with open(f'../data/all_prompt_emb_{split}.pkl', 'wb') as f:
             pickle.dump(prompt_emb, f)
 
     def setup(self, rank, world_size):
@@ -229,11 +233,11 @@ class SAKG:
         if rank == 0:
             # Combine gathered embeddings
             embeddings = torch.cat(gathered_embeddings, dim=0).cpu().numpy()
-            with open('./data/all_prompt_emb.pkl', 'wb') as f:
+            with open('../data/all_prompt_emb.pkl', 'wb') as f:
                 pickle.dump(embeddings, f)
             
     def get_embedding_parallel(self, world_size):    
-        all_prompt_df = pd.read_csv('./data/all_prompts.csv')
+        all_prompt_df = pd.read_csv('../data/all_prompts.csv')
         all_prompts = all_prompt_df['prompt'].tolist()
 
         # Initialize SentenceBertJapanese model
@@ -246,10 +250,10 @@ class SAKG:
 
 
     def get_embedding_entity(self):
-        entity_df = pd.read_csv('./data/sakg_entity.csv')
+        entity_df = pd.read_csv('../data/sakg_entity.csv')
         sbert = SentenceBertJapanese()
         entity_emb = sbert.encode(entity_df['entity'], batch_size=100)
-        with open('./data/all_entity_emb.pkl', 'wb') as f:
+        with open('../data/all_entity_emb.pkl', 'wb') as f:
             pickle.dump(entity_emb, f)
             
     '''
@@ -296,6 +300,69 @@ class SAKG:
         for user, freq in word_freq.items():
             self.add_user_word_relation(user, freq)
     '''
+
+class SAKG(SAKGOld):
+    def __init__(self, load=False):
+        #self.graph_path = '../data/kg/sakg_noun_adj.pkl'
+        if load:
+            self.load_graph()
+        else:
+            self.df_review = pd.read_pickle(
+                "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
+            )
+            with open('../data/kg/pairs_adj.pkl', 'rb') as f:
+                pairs_adj = pickle.load(f)
+            with open('../data/kg/pairs_noun.pkl', 'rb') as f:
+                pairs_noun = pickle.load(f)
+            le_user = LabelEncoder()
+            le_spot = LabelEncoder()
+            self.df_review['user_id'] = le_user.fit_transform(self.df_review['url'])
+            self.df_review['spot_id'] = le_spot.fit_transform(self.df_review['spot'])
+            self.df_review['pairs_noun'] = pairs_noun
+            self.df_review['pairs_adj'] = pairs_adj
+            print('pairs_noun', pairs_noun[:5])
+            print( 'pairs_adj', pairs_adj[:5])
+            self.nlp = spacy.load('ja_ginza')
+                
+            
+            #self.build_graph()
+            #self.clean_up_edges()
+            #self.visualize_graph(num_nodes=20)
+            #self.print_graph_statistics()
+            #self.save_graph()
+
+    def build_graph(self, adj=True, noun=False, save=False, graph_path='../data/kg/sakg_noun_adj.pkl'):
+        self.graph = nx.Graph()
+        if noun:
+            for i, row in tqdm(self.df_review.iterrows()):
+                user_id, spot, pairs_noun, review = row['user_id'], row['spot'], row['pairs_noun'], row['review']
+                user_node = 'user_' + str(user_id)
+                # ノードカテゴリを追加
+                self.graph.add_node(user_node, category='user')
+                self.graph.add_node(spot, category='spot')
+                for noun1,p1, noun2,p2 in pairs_noun:
+                    self.graph.add_node(noun1, category='word')
+                    self.graph.add_node(noun2, category='word')
+                    self._add_edge_with_count(user_node, noun1, noun2)
+                    self._add_edge_with_count(user_node, noun2, noun1)
+                    self._add_edge_with_count(spot, noun1, noun2)
+                    self._add_edge_with_count(spot, noun2, noun1)
+
+        if adj:
+            for i, row in tqdm(self.df_review.iterrows()):
+                user_id, spot, pairs_adj, review = row['user_id'], row['spot'], row['pairs_adj'], row['review']
+                user_node = 'user_' + str(user_id)
+                # ノードカテゴリを追加
+                self.graph.add_node(user_node, category='user')
+                self.graph.add_node(spot, category='spot')
+                for adj, noun in pairs_adj:
+                    self.graph.add_node(noun, category='word')
+                    self._add_edge_with_count(user_node, noun, adj)
+                    self._add_edge_with_count(spot, noun, adj)
+
+        self.clean_up_edges(count_thresh=3)
+        if save:
+            self.save_graph(graph_path)
             
 
 

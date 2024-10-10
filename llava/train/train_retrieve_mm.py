@@ -32,7 +32,7 @@ import tokenizers
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
 from llava.train.llava_trainer import LLaVATrainer, LLaVARetrievalTrainer
-from llava.model.language_model.llava_retrieve_llama import LlavaRetrieveForCausalLM, LlavaRetrieveEmbForCausalLM
+from llava.model.language_model.llava_retrieve_llama import LlavaRetrieveForCausalLM, LlavaRetrieveMMForCausalLM
 from llava import conversation as conversation_lib
 from llava.model import *
 from llava.mm_utils import tokenizer_image_token
@@ -774,24 +774,19 @@ class LazySupervisedDataset(Dataset):
         
         id = sources[0]['id']
         spot_name = id.split('_')[0]
-        prompts = [conv['value'] for conv in sources[0]['conversations'] if conv['from']=='human']
         if 'qa' in id:
             tasks = ['QA' for _ in range(len(sources[0]['conversations'])//2)]
         else:
             tasks = sources[0].get('task_ids', [])
-
-        if not len(tasks):
-            tasks = ['task' for _ in range(len(prompts))]
             
         if 'shuffle' in id:
             start_entities = [LazySupervisedDataset.extract_spot_name_qa(q['value']) for q in sources[0]['conversations'][0::2]]
         else:
             start_entities = [spot_name for _ in range(len(tasks))]
-        # print('staert_entities', start_entities)
-        triplets = [self.retrieve_triplets(start_entity, prompt_ind) for prompt_ind,start_entity in enumerate(start_entities)]
-        # print('triplets', triplets)
-        
+        #print('staert_entities', start_entities)
+        # triplets = [self.retrieve_triplets(start_entity, prompt_ind) for prompt_ind,start_entity in enumerate(start_entities)]
 
+        prompts = [conv['value'] for conv in sources[0]['conversations'] if conv['from']=='human']
         
         if 'image' in sources[0]:
             image_file = self.list_data_dict[i]['image']
@@ -836,9 +831,11 @@ class LazySupervisedDataset(Dataset):
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
             
-        data_dict['triplet'] = triplets
+        # data_dict['triplet'] = triplets
+        data_dict['start_entity'] = start_entities
         data_dict['prompt'] = prompts
         data_dict['task'] = tasks
+        
         return data_dict
 
 
@@ -873,7 +870,7 @@ class DataCollatorForSupervisedDataset(object):
             else:
                 batch['images'] = images
                 
-        batch['triplets'] = [instance['triplet'] for instance in instances]
+        batch['start_entities'] = [instance['start_entity'] for instance in instances]
         batch['prompts'] = [instance['prompt'] for instance in instances]
         batch['tasks'] = [instance['task'] for instance in instances]
         
@@ -931,7 +928,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
         else:
-            model = LlavaRetrieveEmbForCausalLM.from_pretrained(
+            model = LlavaRetrieveMMForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
@@ -1103,12 +1100,12 @@ def train(attn_implementation=None):
         # parameter_keys = model.named_parameters.keys()
         set_peft_model_state_dict(model, tensors)
     
-    model.get_model().initialize_entity_modules()
+    model.get_model().initialize_mm_retriever()
     #entity_tower = model.get_entity_tower()
     #entity_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
-    #model.get_model().get_entity_tower().to(dtype=torch.bfloat16, device='cuda')
-    #model.get_model().to(dtype=torch.bfloat16, device='cuda')
-    #model.get_model().relation_projector.to(dtype=torch.bfloat16, device='cuda')
+    model.get_model().get_mm_retriever().to(dtype=torch.bfloat16, device='cuda')
+    model.get_model().to(dtype=torch.bfloat16, device='cuda')
+    model.get_model().document_projector.to(dtype=torch.bfloat16, device='cuda')
     # trainer = LLaVARetrievalTrainer(model=model,
     #                                 tokenizer=tokenizer,
     #                                 args=training_args,

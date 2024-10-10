@@ -103,6 +103,9 @@ class DownSampler(nn.Module):
 def build_entity_projector(config):
     return nn.Linear(768, config.hidden_size)
 
+def build_document_projector(config):
+    return nn.Linear(768, config.hidden_size)
+
 def build_vision_projector(config, delay_load=False, **kwargs):
     #print('build projector config', config)
     projector_type = getattr(config, 'mm_projector_type', 'linear')

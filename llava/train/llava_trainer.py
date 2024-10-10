@@ -260,12 +260,13 @@ def preprocess_v1(
                         retrieved_entities_tmp.append(retrieved_entity)
                 
                 if len(retrieved_entities_tmp):
-                    value += 'ただし, 補助情報は以下です'+'、'.join(retrieved_entities_tmp)
+                    value += 'ただし, 補助情報は以下です。'+'「'+'、'.join(retrieved_entities_tmp)+'」'
                 
             conv.append_message(role, value)
             
         conversations.append(conv.get_prompt())
     #print('conversations', conversations)
+    # print('conversations', conversations)
     # Tokenize conversations
     #print('conversations', conversations)
     if has_image:
@@ -914,9 +915,10 @@ class LLaVARetrievalTrainer(LLaVATrainer):
                 #retrieved_entities = model.get_model().retriever(prompt, start_entity, task)
                 #print('retrieved entity', retrieved_entities)
                 
-        retrieved_entities, prompt_indices = model.get_model().retriever(batched_data, batched_entity_index, batched_prompt_index)
-        #print('retrieved entities', retrieved_entities)
-        #print('prompt_indices', prompt_indices)
+        # retrieved_entities, prompt_indices = model.get_model().retriever(batched_data, batched_entity_index, batched_prompt_index)
+        retrieved_entities, prompt_indices = model.get_model().retriever.retrieve_simple(batched_data, batched_entity_index, batched_prompt_index)
+        # print('retrieved entities', retrieved_entities)
+        # print('prompt_indices', prompt_indices)
         inputs['retrieved_entities'] = retrieved_entities
         inputs['prompt_indices'] = prompt_indices
         
@@ -985,7 +987,7 @@ class LLaVARetrievalTrainer(LLaVATrainer):
         # print('inputs', inputs)
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs)
-        print('loss', loss)
+        #print('loss', loss)
         del inputs
         # if (
         #     self.args.torch_empty_cache_steps is not None
@@ -1001,7 +1003,8 @@ class LLaVARetrievalTrainer(LLaVATrainer):
         #         torch.mps.empty_cache()
         #     else:
         #         torch.cuda.empty_cache()
-
+        if self.state.global_step % 50 == 0:
+            torch.cuda.empty_cache()
         kwargs = {}
 
         # For LOMO optimizers you need to explicitly use the learnign rate

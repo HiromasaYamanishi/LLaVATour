@@ -12,6 +12,7 @@ from transformers import (
     BertJapaneseTokenizer, 
     BertModel
 )
+import random
 from tqdm import tqdm
 
 class AttentionScorer(nn.Module):
@@ -32,8 +33,35 @@ def print_grad(grad):
     print("勾配:", grad)
     return grad
 
+class MMRetriever(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        df_review = pd.read_pickle('/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl')
+        df_test = pd.read_csv('./data/df_review_feature_eval.csv')
+        test_reviews = df_test['review'].values
+        self.spot2reviews = defaultdict(list)
+        for spot, review in zip(df_review['spot'], df_review['review']):
+            if review in test_reviews:continue
+            self.spot2reviews[spot].append(spot)
+
+    def forward(images, start_entities, prompts, tasks, topk=5):
+        '''
+        images: tensor [batch x image]
+        start_entities: [['函館山', '函館山', '函館山'], ['東京タワー', '浅草寺']]
+        prompts: [['観光地の名前を答えて', 'レビューを書いて', '感想を書いて'], ['レビューを書いて', 'どこにありますか']]
+        tasks: [['LR', 'Review', 'Review'], ['Review', 'QA']]
+        '''
+        for i, (start_entity, prompt, task) in enumerate(zip(start_entities, prompts, tasks)):
+            for s, p, t in zip(start_entiy, prompt, task):
+                image = images[i]
+                
+
+
+
+        pass
+
 class Retriever(torch.nn.Module):
-    def __init__(self, graph_path='./data/kg/sakg.pkl'):
+    def __init__(self, graph_path='./data/kg/sakg_adj.pkl'):
         super().__init__()
         with open(graph_path, 'rb') as f:
             self.graph = pickle.load(f)
@@ -83,7 +111,7 @@ class Retriever(torch.nn.Module):
         '''
         batched_data: [(prompt_1_1, start_entity_1_1, task_1_1)...(prompt_n_m, start_entity_n_m, task_n_m)]
         '''
-        print('scorer weight ', self.scorer.mlp[0].weight)
+        #print('scorer weight ', self.scorer.mlp[0].weight)
         prompts = [data[0] for data in batched_data]
         start_entities = [data[1] for data in batched_data]
         tasks = [data[2] for data in batched_data]
@@ -131,10 +159,9 @@ class Retriever(torch.nn.Module):
         start_emb = all_emb[len(prompts): len(prompts)+len(start_entities)]
         task_emb = all_emb[len(prompts)+len(start_entities):len(prompts)+len(start_entities)+len(tasks)]
         relation_emb = all_emb[len(prompts)+len(start_entities)+len(tasks):]
-        # print(len(prompts), len(batched_neighbors), len(batched_relations))
-        # print(prompt_emb.shape, start_emb.shape, task_emb.shape, relation_emb.shape)
+
         assert len(batched_relations)==len(batched_counts)==len(batched_start_entities_rel)==len(batched_start_indices_rel)
-        #print('relation num', len(batched_relations))
+
         if len(batched_relations):
             count_emb = self.count_embs(torch.tensor(batched_counts).to(torch.long).cuda()) # [relationの合計 x 768]
             count_emb.register_hook(print_grad)
@@ -146,8 +173,6 @@ class Retriever(torch.nn.Module):
             # chosen_relations = [batched_relations[i] for i in range(len(chosen_flag)) if chosen_flag[i]]
             # chosen_start_entity_for_relation = [batched_start_entities_rel[i] for i in range(len(chosen_flag)) if chosen_flag[i]]
             
-            # print('chosen')
-            # print('alpha', alpha)
             relation_emb = scatter_add(relation_emb.cuda()*alpha.reshape(-1, 1).cuda(), torch.tensor(batched_neighbor_indices_rel).cuda(), dim=0) # [neighborの合計]
         else:
             count_emb = self.count_embs(torch.tensor(batched_counts).to(torch.long).cuda())
@@ -165,13 +190,9 @@ class Retriever(torch.nn.Module):
             task_emb = torch.empty(0, 768)
             prompt_emb = torch.empty(0, 768)
         
-        # print(start_emb.shape, prompt_emb.shape, relation_emb.shape, neighbor_emb.shape)
         score = self.scorer(start_emb.cuda(), prompt_emb.cuda(), relation_emb.cuda(), neighbor_emb.cuda()) # [neighborの合計]
         score.register_hook(print_grad)
-        #for k,v in self.scorer.named_parameters():
-        #    print(k, v.requires_grad)    
-        #print('score', score)
-        # print('score', score, 'batched_thr_scores', batched_thr_scores, 'batched_prompt_indices', batched_prompt_indices)
+
         chosen = score.cuda() > torch.tensor(batched_thr_scores).cuda()
         chosen_entities = [batched_neighbors[i] for i in range(len(batched_neighbors)) if chosen[i]]
         prompt_indices = [batched_prompt_indices[i] for i in range(len(batched_neighbors)) if chosen[i]]
@@ -185,21 +206,150 @@ class Retriever(torch.nn.Module):
         # print(len(chosen_relations), len(chosen_counts), len(chosen_relations))
         chosen_triplets = [str(tuple((chosen_entities[i], chosen_relations[i], chosen_counts[i]))) for i in range(len(chosen_entities))]
         
-        # print('chosen counts', chosen_counts)
-        # print('chosen relations', chosen_relations)
-        # print('chosen entities', chosen_entities)
-        
-        # print('chosen_start_entity_for_relations', chosen_start_entity_for_relation)
-        
-        # print('chosen prompt indices', prompt_indices)
-        #print('score', score)
-        #print('chosen', chosen)
-        # print('chosen entity', chosen_entities, prompt_indices)
-        # print('chosen triplets', chosen_triplets)
         return chosen_triplets, prompt_indices
         
         #batched_relations = [relation for relation,_ in self.graph.neighbors[]]
+    
+    def retrieve_simple(self, batched_data, batched_index, batched_prompt_index, sample_method='ratio', sample_mode='entity_relation_count'):
+        prompts = [data[0] for data in batched_data]
+        start_entities = [data[1] for data in batched_data]
+        tasks = [data[2] for data in batched_data]
+        chosen_entities_or_triplets = []
+        prompt_indices = []
+
+        for i, start_entity in enumerate(start_entities):
+            if start_entity not in self.graph:
+                continue
+
+            if '名前' in prompts[i] or '名称' in prompts[i]:
+                continue
+
+            neighbors = list(self.graph.neighbors(start_entity))
+            if not neighbors:
+                continue
+
+            # entityから出るrelationのcountの総和を計算
+            neighbor_weights = []
+            for neighbor in neighbors:
+                total_count = sum(self.graph[start_entity][neighbor]['relations'].values())
+                neighbor_weights.append(total_count)
+
+            # 最大5つのentityをサンプル（重複なし）
+            num_samples = min(5, len(neighbors))
+            num_samples = random.randint(1, num_samples)
+            if sample_method == 'ratio':
+                sampled_neighbors = random.sample(
+                    population=list(zip(neighbors, neighbor_weights)),
+                    k=num_samples,
+                    counts=[weight for weight in neighbor_weights]
+                )
+                sampled_neighbors = [n for n, _ in sampled_neighbors if 'user' not in n]
+            elif sample_method == 'uniform':
+                sampled_neighbors = random.sample(neighbors, num_samples)
+
+            if sample_mode == 'entity_only':
+                for neighbor in sampled_neighbors:
+                    chosen_entities_or_triplets.append(neighbor)
+                    prompt_indices.append(batched_prompt_index[i])
+            
+            elif sample_mode == 'entity_relation_count':
+                num_relations = random.randint(1, 5)
+                for neighbor in sampled_neighbors:
+                    edge_data = self.graph[start_entity][neighbor]['relations']
+                    relations = list(edge_data.keys())
+                    counts = list(edge_data.values())
+
+                    if not relations:
+                        continue
+
+                    # 最大5つのrelationをサンプル（重複なし）
+                    num_relations_tmp = min(num_relations, len(relations))
+
+                    if sample_method == 'ratio':
+                        sampled_relations = random.sample(
+                            population=list(zip(relations, counts)),
+                            k=num_relations_tmp,
+                            counts=counts
+                        )
+                        sampled_relations = [r for r, _ in sampled_relations]
+
+                    elif sample_method == 'uniform':
+                        sampled_relations = random.sample(relations, num_relations_tmp)
+
+                    for relation in sampled_relations:
+                        count = edge_data[relation]
+                        chosen_entities_or_triplets.append(str((neighbor, relation, count)))
+                        prompt_indices.append(batched_prompt_index[i])
+
+        return chosen_entities_or_triplets, prompt_indices
+
+    # def retrieve_simple(self, batched_data, batched_index, batched_prompt_index, sample_method='ratio', sample_mode='entity_only'):
+    #     prompts = [data[0] for data in batched_data]
+    #     start_entities = [data[1] for data in batched_data]
+    #     tasks = [data[2] for data in batched_data]
+    #     chosen_triplets = []
+    #     prompt_indices = []
         
+    #     for i, start_entity in enumerate(start_entities):
+    #         if start_entity not in self.graph:
+    #             continue
+
+    #         if '名前' in prompts[i] or '名称' in prompts[i]:
+    #             continue
+            
+    #         neighbors = list(self.graph.neighbors(start_entity))
+    #         if not neighbors:
+    #             continue
+            
+    #         # entityから出るrelationのcountの総和を計算
+    #         neighbor_weights = []
+    #         for neighbor in neighbors:
+    #             total_count = sum(self.graph[start_entity][neighbor]['relations'].values())
+    #             neighbor_weights.append(total_count)
+            
+    #         # 最大3つのentityをサンプル（重複なし）
+    #         num_samples = min(5, len(neighbors))
+    #         num_samples = random.randint(1, num_samples)
+    #         if sample_method == 'ratio':
+    #             sampled_neighbors = random.sample(
+    #                 population=list(zip(neighbors, neighbor_weights)),
+    #                 k=num_samples,
+    #                 counts=[weight for weight in neighbor_weights]
+    #             )
+    #             sampled_neighbors = [n for n, _ in sampled_neighbors]
+    #         elif sample_method == 'uniform':
+    #             sampled_neighbors = random.sample(neighbors,num_samples)
+            
+    #         num_relations = random.randint(1, 5)
+    #         for neighbor in sampled_neighbors:
+    #             edge_data = self.graph[start_entity][neighbor]['relations']
+    #             relations = list(edge_data.keys())
+    #             counts = list(edge_data.values())
+                
+    #             if not relations:
+    #                 continue
+                
+    #             # 最大3つのrelationをサンプル（重複なし）
+    #             num_relations_tmp = min(num_relations, len(relations))
+
+    #             if sample_method == 'ratio':
+    #                 sampled_relations = random.sample(
+    #                     population=list(zip(relations, counts)),
+    #                     k=num_relations_tmp,
+    #                     counts=counts
+    #                 )
+    #                 sampled_relations = [r for r, _ in sampled_relations]
+
+    #             elif sample_method == 'uniform':
+    #                 sampled_relations = random.sample(relations, num_relations_tmp)
+                
+    #             for relation in sampled_relations:
+    #                 count = edge_data[relation]
+    #                 chosen_triplets.append(str((neighbor, relation, count)))
+    #                 prompt_indices.append(batched_prompt_index[i])
+        
+    #     return chosen_triplets, prompt_indices
+
     def forward_(self, prompt, start_entity, task, top_k=3):
         #print('retrieval')
         #print('retrieve', prompt, start_entity, task)
@@ -278,3 +428,6 @@ class Retriever(torch.nn.Module):
     
 def build_retriever():
     return Retriever()
+
+def build_mm_retriever():
+    return MMRetriver()

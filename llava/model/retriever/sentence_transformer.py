@@ -24,6 +24,7 @@ class SentenceBertJapanese:
     @torch.no_grad()
     def encode(self, sentences, batch_size=100):
         all_embeddings = []
+    
         iterator = tqdm(range(0, len(sentences), batch_size))
         for batch_idx in iterator:
             batch = sentences[batch_idx:batch_idx + batch_size]

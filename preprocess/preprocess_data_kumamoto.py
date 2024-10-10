@@ -19,7 +19,7 @@ from prompt import *  # make_caption_prompt,make_review_prompt,make_training_dic
 from tqdm import tqdm
 from collections import defaultdict
 import multiprocessing as mp
-
+import argparse
 
 def save_json(obj, json_path):
     with open(json_path, "w") as f:
@@ -38,11 +38,11 @@ def load_multiple_dict(dict_names):
 class DataPreprocessor:
     def __init__(self):
         self.text_image_df = pd.read_csv(
-            "/home/yamanishi/project/trip_recommend/data/jalan/spot/text_image_pairs.csv",
-            #names=["image_url", "text", "spot_name", "ind"],
+            "/home/yamanishi/project/trip_recommend/data/jalan/spot/kumamoto/text_image_user_pairs.csv",
+            names=['image_path', 'caption', 'user', 'spot_name', 'ind']
         )
         self.image_save_dir = (
-            "/home/yamanishi/project/trip_recommend/data/jalan_image_with_caption"
+            "/home/yamanishi/project/trip_recommend/data/jalan_image/kumamoto"
         )
         self.graph_dir = "/home/yamanishi/project/trip_recommend/data/jalan/graph/"
         self.experience_df = pd.read_csv(
@@ -87,20 +87,24 @@ class DataPreprocessor:
 
         clip = CLIP()
         df = []
-        df_review = pd.read_pickle(
-            "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
+        df_review = pd.read_csv(
+            "/home/yamanishi/project/trip_recommend/data/jalan/review/kumamoto/review.csv"
         )
-        df_retrieved = pd.read_csv(
-            "../data/retrieved_reviews.csv",
-            names=[
-                "spot_name",
-                "image_path",
-                "nearest_review",
-                "nearest_review_original",
-                "ind",
-            ],
-        )
-        spot_names = df_retrieved["spot_name"].values
+        os.makedirs('../data/kumamoto/', exist_ok=True)
+        if os.path.exists("../data/kumamoto/retrieved_reviews.csv"):
+            df_retrieved = pd.read_csv(
+                "../data/kumamoto/retrieved_reviews.csv",
+                names=[
+                    "spot_name",
+                    "image_path",
+                    "nearest_review",
+                    "nearest_review_original",
+                    "ind",
+                ],
+            )
+            spot_names = df_retrieved["spot_name"].values
+        else:
+            spot_names = []
         for spot_name in tqdm(self.text_image_df["spot_name"].unique()):
             if spot_name in spot_names:
                 continue
@@ -151,18 +155,16 @@ class DataPreprocessor:
             )
             df["id"] = df["image_path"].apply(get_id)
             df.to_csv(
-                "../data/retrieved_reviews.csv", mode="a", index=False, header=False
+                "../data/kumamoto/retrieved_reviews.csv", mode="a", index=False, header=False
             )
 
     def retrieve_sentences(
         self,
         target="review",
         topk=True,
-        k=11,
-        review_count_thresh=1,
-        sentence_sample_num=1000,
-        split_num=4,
-        index=0
+        k=3,
+        review_count_thresh=5,
+        sentence_sample_num=5000,
     ):
         def get_id(image_path):
             id = image_path.split("/")[-1]
@@ -171,32 +173,32 @@ class DataPreprocessor:
 
         clip = CLIP()
         df = []
-        df_review = pd.read_pickle(
-            "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
+        df_review = pd.read_csv(
+            "/home/yamanishi/project/trip_recommend/data/jalan/review/kumamoto/review.csv"
         )
-        df_review = pd.read_csv('/home/yamanishi/project/airport/src/analysis/LLaVA/data/dataset_personalize/review_train.csv')
-        self.text_image_df = pd.read_csv('../data/llavareview_image.csv')
-    # spot_nameをユニークにし、4分割する
-        unique_spot_names = self.text_image_df["spot_name"].unique()
-        spot_name_chunks = np.array_split(unique_spot_names, 4)
-        chunk_spot_names = spot_name_chunks[index]
-
+        os.makedirs('../data/kumamoto/', exist_ok=True)
+        # df_retrieved = pd.read_csv(
+        #     "../data/kumamoto/retrieved_reviews.csv",
+        #     names=["spot_name", "image_path", "nearest_review", "ind"],
+        # )
+        #spot_names = set(df_retrieved["spot_name"].values)
         if topk:
-            save_path = f"../data/retrieved_{target}_top{k}_chunk{index}.csv"
+            save_path = f"../data/kumamoto/retrieved_{target}_top{k}.csv"
         else:
-            save_path = f"../data/retrieved_{target}_chunk{index}.csv"
-
+            save_path = f"../data/kumamoto/retrieved_{target}.csv"
         if os.path.exists(save_path):
-            processed_spot_names = set(pd.read_csv(save_path, names=["spot_name", "_", "", "id"])["spot_name"].values)
+            spot_names = pd.read_csv(save_path, names=["spot_name", "_", "", "ind"])[
+                "spot_name"
+            ].values
         else:
-            processed_spot_names = set()
+            spot_names = []
 
-        print(f"Processing chunk {index}, containing {len(chunk_spot_names)} spot names")
-        for spot_name in tqdm(chunk_spot_names):
-        #for spot_name in tqdm(self.text_image_df["spot_name"].unique()):
-            if spot_name in processed_spot_names:
+        print("spot_name", spot_names)
+        for spot_name in tqdm(self.text_image_df["spot_name"].unique()):
+            if spot_name in spot_names:
                 continue
             df_tmp = self.text_image_df[self.text_image_df["spot_name"] == spot_name]
+            #print('len', len(df_tmp), 'spot_name', spot_name)
             spot_images = [
                 os.path.join(self.image_save_dir, f"{spot_name}_{i}.jpg")
                 for i in range(len(df_tmp))
@@ -204,10 +206,13 @@ class DataPreprocessor:
                     os.path.join(self.image_save_dir, f"{spot_name}_{i}.jpg")
                 )
             ]
+            if len(spot_images):
+                print(spot_name)
+            #print('spot images', spot_images)
             if len(spot_images) == 0:
                 continue
             df_review_tmp = df_review[df_review["spot"] == spot_name]
-
+            print('df review tmp', df_review_tmp)
             # spot_images = random.sample(spot_images, min(50, len(spot_images)))
 
             if target == "sentence":
@@ -231,19 +236,16 @@ class DataPreprocessor:
                 retrieved_reviews = clip.retrieve_text_from_image_topk(
                     spot_images, spot_reviews, topk=k
                 )
-                per_reviews = len(retrieved_reviews)//len(spot_images)
                 spot_images = [
-                    image_path for image_path in spot_images for _ in range(per_reviews)
+                    image_path for image_path in spot_images for _ in range(k)
                 ]
             else:
                 retrieved_reviews = clip.retrieve_text_from_image(
                     spot_images, spot_reviews
                 )
-            spot_names = [spot_name for _ in range(len(retrieved_reviews))]
-            print(len(spot_names), len(spot_images), len(retrieved_reviews))
             df = pd.DataFrame(
                 {
-                    "spot_name": [spot_name for _ in range(len(retrieved_reviews))],
+                    "spot_name": spot_name,
                     "image_path": spot_images,
                     "nearest_review": retrieved_reviews,
                 }
@@ -266,90 +268,6 @@ class DataPreprocessor:
                 header=False,
             )
 
-    def retrieve_short_sentences(
-        self,
-        target="review",
-        topk=True,
-        k=11,
-        review_count_thresh=1,
-        sentence_sample_num=1000,
-        split_num=4,
-        index=0
-    ):
-        def get_id(image_path):
-            id = image_path.split("/")[-1]
-            id = id.split(".")[0]
-            return id
-
-        clip = CLIP()
-        df = []
-        # df_review = pd.read_pickle(
-        #     "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
-        # )
-        df_review = pd.read_csv('/home/yamanishi/project/airport/src/analysis/LLaVA/data/dataset_personalize/review_not_train.csv')
-        self.text_image_df = pd.read_csv('/home/yamanishi/project/airport/src/analysis/LLaVA/data/df_review_feature_eval.csv')
-    # spot_nameをユニークにし、4分割する
-        if topk:
-            save_path = f"../data/retrieved_{target}_top{k}_chunk{index}.csv"
-        else:
-            save_path = f"../data/retrieved_{target}_chunk{index}.csv"
-
-
-        results = []
-        for i,image_path in tqdm(enumerate(self.text_image_df['image_path'])):
-            #if i==5:break
-            spot_images = [
-                os.path.join(self.image_save_dir, image_path)
-            ]
-            if len(spot_images) == 0:
-                continue
-            spot_name = image_path.split('_')[0]
-            df_review_tmp = df_review[df_review["spot"] == spot_name]
-
-            # spot_images = random.sample(spot_images, min(50, len(spot_images)))
-
-            if target == "sentence":
-                spot_reviews = []
-                original_reviews = {}
-                for review in df_review_tmp["review"]:
-                    review_split = review.split("。")
-                    for r in review_split:
-                        original_reviews[r] = review
-                    spot_reviews += review_split
-            elif target == "review":
-                spot_reviews = list(df_review_tmp["review"].values)
-            spot_reviews = [r for r in spot_reviews if len(r)]
-            spot_reviews = random.sample(
-                spot_reviews,
-                min(sentence_sample_num, len(df_review_tmp)),
-            )
-            if len(spot_reviews) < review_count_thresh:
-                continue
-            if topk:
-                retrieved_reviews = clip.retrieve_text_from_image_topk(
-                    spot_images, spot_reviews, topk=k
-                )
-                per_reviews = len(retrieved_reviews)//len(spot_images)
-                spot_images = [
-                    image_path for image_path in spot_images for _ in range(per_reviews)
-                ]
-            else:
-                retrieved_reviews = clip.retrieve_text_from_image(
-                    spot_images, spot_reviews
-                )
-            for review in retrieved_reviews:
-                result = {
-                    "spot_name": spot_name,
-                    "image_path": image_path,
-                    "nearest_review": review,
-                    "id": get_id(image_path)
-                }
-                if target == "sent":
-                    result["original_review"] = original_reviews.get(review, "")
-                results.append(result)
-        if results:
-            pd.DataFrame(results).to_csv(save_path, mode='a', index=False, header=not os.path.exists(save_path))
-
     def retrieve_images(self):
         def get_id(image_path):
             id = image_path.split("/")[-1]
@@ -358,12 +276,12 @@ class DataPreprocessor:
 
         clip = CLIP()
         df, spot_names = [], []
-        df_review = pd.read_pickle(
-            "/home/yamanishi/project/trip_recommend/data/jalan/review/review_all_period_.pkl"
+        df_review = pd.read_csv(
+            "/home/yamanishi/project/trip_recommend/data/jalan/review/kumamoto/review.csv"
         )
-        if os.path.exists("../data/retrieved_images.csv"):
+        if os.path.exists("../data/kumamoto/retrieved_images.csv"):
             df_retrieved = pd.read_csv(
-                "../data/retrieved_images.csv",
+                "../data/kumamoto/retrieved_images.csv",
                 names=[
                     "spot_name",
                     "image_path",
@@ -455,7 +373,7 @@ class DataPreprocessor:
                 axis=1,
             )
             df.to_csv(
-                "../data/retrieved_images.csv", mode="a", index=False, header=False
+                "../data/kumamoto/retrieved_images.csv", mode="a", index=False, header=False
             )
             
     def retrieve_image_from_keyword_for_pvqa(self, ):
@@ -792,7 +710,17 @@ def make_spot_sentences():
 if __name__ == "__main__":
     #make_spot_sentences()
     #exit()
-    fire.Fire(DataPreprocessor)
+    parser = argparse.ArgumentParser(description="Data Preprocessor Utility")
+    parser.add_argument("-f", default="download_images", help="Function to run")
+    args = parser.parse_args()
+    preprocessor = DataPreprocessor()
+    if args.f == "retrieve_reviews":
+        preprocessor.retrieve_reviews()
+    elif args.f == "retrieve_sentences":
+        preprocessor.retrieve_sentences()
+    elif args.f == "retrieve_images":
+        preprocessor.retrieve_images()
+    #fire.Fire(DataPreprocessor)
 
     # parser = argparse.ArgumentParser(description="Data Preprocessor Utility")
     # parser.add_argument("-f", default="download_images", help="Function to run")

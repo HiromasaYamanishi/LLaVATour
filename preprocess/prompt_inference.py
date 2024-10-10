@@ -15,15 +15,10 @@ def add_premise_prompt(spot, pattern="caption", gender=None, age=None, tag=None,
     prompt = ""
     flag = 0
     season_random = random.random()
-    #season_thresh = 0.4
-    month_thresh = 0
-    #month_thresh=0.7
-    season_thresh = 0.5
-    if season_random < month_thresh:
+    if season_random < 0.4:
         season_suffix = ''
         season_pattern = 1
-    #elif season_thresh<=season_random<0.7:
-    elif month_thresh<=season_random<season_thresh:
+    elif 0.4<=season_random<0.7:
         if month is None or pd.isna(month):
             season_suffix = ''
         else:
@@ -67,8 +62,7 @@ def add_premise_prompt(spot, pattern="caption", gender=None, age=None, tag=None,
             prompt += "を訪問した"
         else:
             prompt += "に旅行で来た"
-        # context_num = random.randint(1, 3)
-        context_num = 3
+        context_num = random.randint(1, 3)
         inds = random.sample([0, 1, 2], context_num)
         contexts = [gender, age, tag]
         for ind in inds:
@@ -82,14 +76,12 @@ def add_premise_prompt(spot, pattern="caption", gender=None, age=None, tag=None,
             context_pattern = 2
 
         prof_random = random.random()
-        #if prof_random < 0.4 and prof_tag is not None:
-        if prof_random < 0.5 and prof_tag is not None:
+        if prof_random < 0.4 and prof_tag is not None:
             if type(prof_tag) is str and not pd.isna(prof_tag):
                 prof_tag = prof_tag.replace('\n', '')
                 prompt+=f'{prof_tag}の'
                 flag+=1<<6
-        # elif 0.4 < prof_random < 0.7 and prof_sent is not None:
-        elif 0.5 < prof_random < 1 and prof_sent is not None:
+        elif 0.4 < prof_random < 0.7 and prof_sent is not None:
             if type(prof_sent) is str and not pd.isna(prof_sent):
                 prompt+=prof_sent
                 flag+=1<<7
@@ -126,67 +118,70 @@ def add_photo_prompt(prompt):
     return prompt
 
 
-def add_review_prompt(prompt, short, rating=None,pattern="caption", flag=0, review_length=None):
-    '''
-    rating: 8
-    '''
-    premise_random = random.random()
-    review_random = random.random()
-    rating_random = random.random()
-    if pattern == "caption":
-        if premise_random < 0.4:
-            prompt += ""
-        elif 0.4 < premise_random < 0.6:
-            prompt += "訪問したつもりで"
-        elif 0.6 < premise_random < 0.8:
-            prompt += "観光客のつもりで"
-        else:
-            prompt += "観光客のように"
+def add_premise_prompt(spot, pattern="caption", gender=None, age=None, tag=None, month=None, season=None, prof_tag=None, prof_sent=None):
+    prompt = ""
+    flag = 0
 
-    if rating is not None:
-        #if rating_random<0.4:
-        if rating_random>0:
-            prompt+=f'星{int(rating)}の'
-            flag+=1<<8
-
-    if review_random < 0.6:
-        prompt += "レビューを"
-
-    elif 0.6<review_random < 0.8:
-        prompt += "レビュー文を"
+    if season is not None and not pd.isna(season):
+        season_suffix = season + 'に'
+        flag += 1<<5
+    elif month is not None and not pd.isna(month):
+        season_suffix = str(month) + '月に'
+        flag += 1<<4
     else:
-        prompt += "感想を"
+        season_suffix = ''
+
+    if pattern == "caption":
+        prompt += f"この場所は{spot}です。"
+    elif pattern in ["visitor", "context"]:
+        prompt += f"あなたは{season_suffix}{spot}に観光で訪れた"
+
+        if pattern == "context":
+            contexts = []
+            if gender is not None and not pd.isna(gender):
+                contexts.append(gender)
+                flag += 1<<1
+            if age is not None and not pd.isna(age):
+                contexts.append(age)
+                flag += 1<<2
+            if tag is not None and not pd.isna(tag):
+                contexts.append(tag)
+                flag += 1<<3
+            
+            prompt += "、".join(contexts) + "の" if contexts else ""
+
+            if prof_tag is not None and not pd.isna(prof_tag):
+                prof_tag = prof_tag.replace('\n', '')
+                prompt += f'{prof_tag}の'
+                flag += 1<<6
+            elif prof_sent is not None and not pd.isna(prof_sent):
+                prompt += prof_sent
+                flag += 1<<7
+
+        prompt += "観光客です。"
+
+    return prompt, flag
+
+def add_review_prompt(prompt, short, rating=None, pattern="caption", flag=0, review_length=None):
+    if pattern == "caption":
+        prompt += "訪問したつもりで"
+
+    if rating is not None and not pd.isna(rating):
+        prompt += f'星{int(rating)}の'
+        flag += 1<<8
+
+    prompt += "レビューを"
 
     if short:
-        short_random = random.random()
-        if short_random < 0.4:
-            prompt += "一文で"
-        elif 0.4 < review_random < 0.6:
-            prompt += "簡潔に"
-        elif 0.6 < review_random < 0.8:
-            prompt += '簡単に'
-        else:
-            prompt += "手短に"
+        prompt += "簡潔に"
 
-    length_random = random.random()
-    #if length_random < 0.2 and review_length is not None:
-    if length_random < 1 and review_length is not None:
+    if review_length is not None and not pd.isna(review_length):
         review_length = round_to_tens(review_length)
-        if random.random()<0.5:
-            prompt+=f'{review_length}文字程度で'
-        else:
-            prompt+=f'{review_length}文字前後で'
+        prompt += f'{review_length}文字程度で'
         flag += 1<<0
 
-    action_random = random.random()
-    if action_random < 0.3:
-        prompt += "生成してください"
-    elif 0.3 < action_random < 0.6:
-        prompt += "書いてください"
-    elif 0.6 < action_random < 0.8:
-        prompt += "作成してください"
-    else:
-        prompt += "述べてください"
+    prompt += "書いてください。"
+
     return prompt, flag
 
 
@@ -254,19 +249,15 @@ def make_review_context_prompt(spot, tag, gender, age, month, season, rating, pr
     image: 0
     '''
     prompt_random = random.random()
-    if prompt_random < context_ratio:
-        prompt, flag = add_premise_prompt(
-            spot, pattern="context", gender=gender, age=age, tag=tag, month=month, season=season, prof_tag=prof_tag, prof_sent=prof_sent,
-        )
-    else:
-        prompt, flag = add_premise_prompt(spot, pattern="visitor")
+    prompt, flag = add_premise_prompt(
+        spot, pattern="context", gender=gender, age=age, tag=tag, month=month, season=season, prof_tag=prof_tag, prof_sent=prof_sent,
+    )
+    #prompt, flag = add_premise_prompt(spot, pattern="visitor")
     # if image_path is not None:
     #     prompt = add_photo_prompt(prompt)
     #     flag += 1<<0
     prompt = add_photo_prompt(prompt)
     prompt, flag = add_review_prompt(prompt, short=False, rating=rating, pattern="visitor", flag=flag, review_length=review_length)
-    #if random.random()<0.001:
-    #    print(prompt, flag)
     return prompt, flag
 
 
@@ -277,13 +268,13 @@ def make_review_context_posneg_prompt(spot, tag, gender, age, month, season, rat
     phrase: 9
     '''
     prompt_random = random.random()
-    if prompt_random < context_ratio:
-        prompt, flag = add_premise_prompt(
-            spot, pattern="context", gender=gender, age=age, tag=tag, month=month, season=season, prof_tag=prof_tag, prof_sent=prof_sent
-        )
-    else:
-        prompt, flag = add_premise_prompt(spot, pattern="visitor")
-    if not len(matches):
+    # if prompt_random < context_ratio:
+    prompt, flag = add_premise_prompt(
+        spot, pattern="context", gender=gender, age=age, tag=tag, month=month, season=season, prof_tag=prof_tag, prof_sent=prof_sent
+    )
+    # else:
+    #     prompt, flag = add_premise_prompt(spot, pattern="visitor")
+    if pd.isna(matches) or not len(matches):
         # if image_path is not None:
         #     prompt = add_photo_prompt(prompt)
         #     flag += 1<<0
@@ -296,7 +287,7 @@ def make_review_context_posneg_prompt(spot, tag, gender, age, month, season, rat
             phrase = random.sample(matches, 1)[0]
         elif isinstance(matches, str):
             phrase = matches
-        #print('phrase', phrase)
+        print('phrase', phrase)
         place_random = random.random()
         if place_random < 0.3:
             prompt = add_pre_posneg_prompt(prompt, phrase)
@@ -320,8 +311,8 @@ def make_review_context_posneg_prompt(spot, tag, gender, age, month, season, rat
             prompt, flag = add_review_prompt(prompt, short=False, rating=rating, pattern="visitor", review_length=review_length, flag=flag)
             prompt = add_post_posneg_prompt(prompt, phrase)
     #data_type = data_type + 7
-    #if random.random()<0.001:
-    #    print(prompt, flag)
+    if random.random()<0.001:
+        print(prompt, flag)
     return prompt, flag
 
 

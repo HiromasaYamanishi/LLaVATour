@@ -60,12 +60,10 @@ def set_seed(seed):
 
 class DatasetMaker:
     def __init__(self):
-        self.text_image_df = pd.read_csv(
-            "/home/yamanishi/project/trip_recommend/data/jalan/spot/text_image_pairs.csv",
-            # names=["image_url", "text", "spot_name", "ind"],
-        )
+        self.text_image_df =  pd.read_csv('/home/yamanishi/project/trip_recommend/data/jalan/spot/kumamoto/text_image_user_pairs.csv',
+                names=['image_path', 'caption', 'user', 'spot', 'ind'])
         self.image_save_dir = (
-            "/home/yamanishi/project/trip_recommend/data/jalan_image_with_caption"
+            "/home/yamanishi/project/trip_recommend/data/jalan_image/kumamoto"
         )
         self.graph_dir = "/home/yamanishi/project/trip_recommend/data/jalan/graph/"
         self.experience_df = pd.read_csv(
@@ -78,8 +76,7 @@ class DatasetMaker:
         )
         #self.image_metas = self.text_image_df.set_index("id").T.to_dict()
         self.image_metas = None
-        self.review_train = pd.read_csv('../data/dataset_personalize/review_train.csv', engine='python')
-        print('review_train', len(self.review_train))
+        self.review_train = pd.read_csv('../data/dataset_personalize/review_train.csv')
         self.review2url = dict(zip(self.review_train['review'], self.review_train['url']))
         self.user_profile_tag = pd.read_csv('../data/dataset_personalize/user_profile_tag.csv')
         self.user_profile_sent = pd.read_csv('../data/dataset_personalize/user_profile_sent.csv')
@@ -156,7 +153,6 @@ class DatasetMaker:
             print('curent train num', len(training_datas))
 
         if 'r' in tasks:
-            # training_datas = self.make_training_data_from_posneg(training_datas, review_only=review_only)
             print('make review')
             training_datas = self.make_training_data_from_retrieved_review(training_datas, review_only=review_only)
             print('curent train num', len(training_datas))
@@ -193,20 +189,26 @@ class DatasetMaker:
         # training_datas = self.make_training_data_from_context_information(training_datas)
 
     def train_test_split(self, data):
-        def is_test(d, test_image_set):
-            return d.get('image') is not None and d.get('image') in test_image_set
-        image_set = set([d.get("image") for d in data])
-        with open('../playground/data/v4/test.json', 'rb') as f:
-            test = json.load(f)
-            
-        test_image_set = set([t.get('image', '') for t in test])
-        # print("test image", test_image_set)
-        test_data = [d for d in data if is_test(d, test_image_set)]
-        train_data = [d for d in data if not is_test(d, test_image_set)]
-        # test_data = [d for d in data if d.get("image") in test_image_set]
-        # train_data = [d for d in data if d.get('image')]
-        # train_data = [d for d in data if (d.get("image") not in test_image_set or d.get('image') is None)]
-        # train_data = [d for d in train_data if ('image' not in d or d['image'].endswith('.jpg'))]
+        def is_test(d, test_images):
+            return d.get('image') in test_images
+
+        # Get all unique images in the data
+        unique_images = list(set([d.get("image") for d in data if d.get("image") is not None]))
+
+        # Shuffle the images to ensure random distribution
+        random.shuffle(unique_images)
+
+        # Calculate the split index for 90% train and 10% test
+        split_index = int(len(unique_images) * 0.9)
+
+        # Split the unique images into training and testing sets
+        train_images = set(unique_images[:split_index])
+        test_images = set(unique_images[split_index:])
+
+        # Split the data based on the train and test images
+        train_data = [d for d in data if is_test(d, train_images)]
+        test_data = [d for d in data if is_test(d, test_images)]
+
         print(len(train_data), len(test_data))
         return train_data, test_data
 
@@ -225,7 +227,8 @@ class DatasetMaker:
         '''
         print("Making training data from retrieved review")
         retrieved_df = pd.read_csv(
-            "../data/retrieved_reviews.csv",
+            "../data/kumamoto/retrieved_reviews.csv",
+            names=['spot_name', 'url', 'review_short', 'review_long', 'id']
         )
         review_shorts, review_longs = self.load_reviews(
             retrieved_df
@@ -237,7 +240,7 @@ class DatasetMaker:
             spot_name = row['spot_name']
             tasks, instructions, texts, flags = [], [], [], []
             if not os.path.exists(
-                f"/home/yamanishi/project/trip_recommend/data/jalan_image_with_caption/{id}.jpg"
+                f"{self.image_save_dir}/{id}.jpg"
             ):
                 continue  # テキストがNAか、画像が存在しない場合はスキップ
             image_path = f"{id}.jpg"
@@ -314,8 +317,7 @@ class DatasetMaker:
                 else:
                     review_length_short =None
                 prompt_short, flag_short = make_review_prompt(row["spot_name"], short=True, image_path=image_path, review_length=review_length_short)
-                prompt_long, flag_long = make_review_context_prompt(
-                            row["spot_name"], row["tag"], row["sex"], row["age"], row['month'], row['season'], row['rating'], tag, sent, image_path, review_length_long
+                prompt_long, flag_long = make_review_prompt(row["spot_name"], short=False, image_path=image_path, review_length=None
                         )
                 flags.extend([flag_short, flag_long])
                 #print('prompt long', prompt_long)
@@ -346,7 +348,8 @@ class DatasetMaker:
             CRG: Conditional Review Generation
         '''
         print("Making training data from retrieved images")
-        retrieved_image_df = pd.read_csv('../data/df_not_used_images.csv')
+        retrieved_image_df = pd.read_csv('../data/df_not_used_images.csv',
+        names=['spot_name', ])
         nice_count_less5, nice_count_more5 = 0, 0
         nice_count_thresh = 10
         for _, row in tqdm(
@@ -408,22 +411,22 @@ class DatasetMaker:
         '''
         print("Making training data from retrieved images")
         retrieved_image_df = pd.read_csv(
-            "../data/retrieved_image_per_3text.csv",
-            # names=[
-            #     "spot_name",
-            #     "image_path",
-            #     "review",
-            #     "ind",
-            #     "index",
-            #     "title",
-            #     "rating",
-            #     "tag",
-            #     "sex",
-            #     "age",
-            #     "name",
-            #     "url",
-            #     "visit_time",
-            # ],
+            "../data/kumamoto/retrieved_images.csv",
+            names=[
+                "spot_name",
+                "image_path",
+                "review",
+                "ind",
+                "index",
+                "title",
+                "rating",
+                "tag",
+                "sex",
+                "age",
+                "name",
+                "url",
+                "visit_time",
+            ],
         )
         nice_count_less5, nice_count_more5 = 0, 0
         nice_count_thresh = 10
@@ -502,11 +505,10 @@ class DatasetMaker:
 
             if type(row['review']) is str:
                 review_length = len(row['review'])
+            prompt, flag = make_review_prompt(row["spot_name"], short=False, image_path=image_path, review_length=None
+                    )
 
-            prompt_long, flag = make_review_context_prompt(
-                spot_name, row["tag"], row["sex"], row["age"], row['month'], row['season'], row['rating'], tag, sent, image_path, review_length
-            )
-            instructions.append(prompt_long)
+            instructions.append(prompt)
             texts.extend([row["review"]])
             tasks.append(f'CRG_1_{flag}')
             flags.append(flag)
@@ -532,26 +534,26 @@ class DatasetMaker:
         )
         print("Making training data from posneg review")
         retrieved_review_df = pd.read_csv(
-            "/home/yamanishi/project/airport/src/analysis/LLaVA/data/retrieved_direct_reviews.csv",
+            "/home/yamanishi/project/airport/src/analysis/LLaVA/data/kumamoto/retrieved_review_top3.csv",
+            names=['spot_name', 'url', 'review', 'id']
         )
         for _, row in tqdm(
             retrieved_review_df.iterrows(), total=retrieved_review_df.shape[0]
         ):
-            ind = row["ind"]
+            ind = row["id"]
             if not os.path.exists(os.path.join(self.image_save_dir, f"{ind}.jpg")):
                 continue
             # テキストがNAまたは画像が存在しない場合はスキップ
             tasks, instructions, texts, flags = [], [], [], []
             spot_name = row["spot_name"].replace("/", "")
-            id = f'{row["ind"]}_posneg'
-            image_path = f'{row["ind"]}.jpg'
+            id = f'{row["id"]}_posneg'
+            image_path = f'{row["id"]}.jpg'
             if not review_only:
                 instructions.append(make_spot_name_prompt(row["spot_name"]))
                 tasks.append('LR_1_1')
                 texts.append(row["spot_name"])
-            posneg_tmp = posneg[row["index"]]
-            matches = re.findall(r"「([^」]+)」", posneg_tmp)
-            print('matches', matches)
+            #posneg_tmp = posneg[row["index"]]
+            #matches = re.findall(r"「([^」]+)」", posneg_tmp)
             review = row['review']
             
             if review in self.review2url and self.review2url[review] in self.url2tag:
@@ -570,9 +572,8 @@ class DatasetMaker:
 
             if type(row['review']) is str:
                 review_length = len(row['review'])
-            prompt, flag = make_review_context_posneg_prompt(
-                    spot_name, row["tag"], row["sex"], row["age"], row['month'], row['season'], row['rating'], tag, sent, matches, image_path, review_length
-                )
+            prompt, flag= make_review_prompt(row["spot_name"], short=False, image_path=image_path, review_length=None
+                    )
             instructions.append(prompt)
             tasks.append(f'CRG_1_{flag}')
 
@@ -830,7 +831,7 @@ class DatasetMaker:
 
 if __name__ == "__main__":
     d = DatasetMaker()
-    save_dir = '../playground/data/v34'
+    save_dir = '../playground/data/kumamoto/v1'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     d.make_training_data(save_dir=save_dir, tasks='r', max_train_size=1000000, review_only=True)

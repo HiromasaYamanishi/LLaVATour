@@ -1,4 +1,4 @@
-from llava.train.train_retrieve import train
+from llava.train.train_retrieve_mm import train
 import os
 #os.environ["WANDB_PROJECT"]="llava"
 

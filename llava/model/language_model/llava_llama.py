@@ -78,6 +78,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         #print('input_embeds', inputs_embeds, input_ids)
+        #print('output_attentions', output_attentions)
         if inputs_embeds is None:
             (
                 input_ids,
@@ -152,6 +153,135 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             inputs_embeds=inputs_embeds,
             **kwargs
         )
+
+    @torch.no_grad()
+    def generate_with_attention(
+        model,
+        inputs: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        image_sizes: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        position_ids = kwargs.pop("position_ids", None)
+        attention_mask = kwargs.pop("attention_mask", None)
+        max_length = kwargs.get('max_length', 512)
+
+        if images is not None:
+            (
+                inputs,
+                position_ids,
+                attention_mask,
+                _,
+                inputs_embeds,
+                new_labels
+            ) = model.prepare_inputs_labels_for_multimodal(
+                inputs,
+                position_ids,
+                attention_mask,
+                None,
+                inputs,
+                images,
+                image_sizes=image_sizes
+            )
+        else:
+            inputs_embeds = model.get_model().embed_tokens(inputs)
+
+        # 入力をバッチ化
+        if inputs_embeds.dim() == 2:
+            inputs_embeds = inputs_embeds.unsqueeze(0)
+        
+        #print('inputs', inputs, new_labels)
+        generated = None
+        past = None
+        all_attentions = []
+
+        for i in range(max_length):
+            if i == 0:
+                outputs = model(
+                    inputs_embeds=inputs_embeds,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    output_attentions=True,
+                    use_cache=True
+                )
+            else:
+                # 最後に生成されたトークンのみをembeddingに変換
+                last_token_embed = model.get_model().embed_tokens(generated[:, -1:])
+                
+                outputs = model(
+                    inputs_embeds=last_token_embed,
+                    position_ids=position_ids[:, -1:] if position_ids is not None else None,
+                    attention_mask=attention_mask if attention_mask is not None else None,
+                    past_key_values=past,
+                    output_attentions=True,
+                    use_cache=True
+                )
+
+            next_token = outputs.logits[:, -1, :].argmax(dim=-1)
+            if generated is None:
+                generated = next_token.unsqueeze(-1)
+            else:
+                generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=-1)
+
+            if attention_mask is not None:
+                attention_mask = torch.cat([attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1)
+            if position_ids is not None:
+                position_ids = torch.cat([position_ids, (position_ids[:, -1] + 1).unsqueeze(-1)], dim=-1)
+
+            past = outputs.past_key_values
+            all_attentions.append([attn[:, :, 0, :].cpu() for attn in outputs.attentions])  # 最後のトークンのアテンションのみを保存
+
+            if next_token.item() == model.config.eos_token_id:
+                break
+
+        return generated, all_attentions, new_labels
+    
+    @torch.no_grad()
+    def generate_with_attention_(
+        self,
+        inputs: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        image_sizes: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[GenerateOutput, torch.LongTensor]:
+        position_ids = kwargs.pop("position_ids", None)
+        attention_mask = kwargs.pop("attention_mask", None)
+        if "inputs_embeds" in kwargs:
+            raise NotImplementedError("`inputs_embeds` is not supported")
+        if images is not None:
+            (
+                inputs,
+                position_ids,
+                attention_mask,
+                _,
+                inputs_embeds,
+                _
+            ) = self.prepare_inputs_labels_for_multimodal(
+                inputs,
+                position_ids,
+                attention_mask,
+                None,
+                None,
+                images,
+                image_sizes=image_sizes
+            )
+        else:
+            #print('inputs', inputs.shape)
+            inputs_embeds = self.get_model().embed_tokens(inputs)
+        #print('input_embeds.', inputs_embeds.shape)
+
+        outputs = super().generate(
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=True,
+            **kwargs
+        )
+        
+
+        attentions = outputs.attentions if hasattr(outputs, 'attentions') else None
+        return outputs, attentions
+
         
     @torch.no_grad()
     def generate_rec(

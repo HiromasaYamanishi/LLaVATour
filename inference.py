@@ -10,12 +10,13 @@ import pandas as pd
 import requests
 
 # from sumeval.metrics.bleu import BLEUCalculator
-from lmm import BLIPInference, LLaVAInference, StableVLMInference, LLaVANext, QwenVLChat, LLaVANextLarge, GPT3, GPT4
+from lmm import BLIPInference, LLaVAInference, StableVLMInference, LLaVANext, QwenVLChat, LLaVANextLarge, GPT3, GPT4, LLaVARetrieveInfernce, InternVLInference
 from PIL import Image
 from tqdm import tqdm
 import os
 import argparse
 import google.generativeai as genai
+from preprocess.prompt_inference import make_review_context_prompt, make_review_context_posneg_prompt
 
 # from sumeval.metrics.rouge import RougeCalculator
 
@@ -70,7 +71,7 @@ class Inferencer:
         self.image_dir = "/home/yamanishi/project/trip_recommend/data/jalan_image_with_caption"
 
     @staticmethod
-    def inference(args, model_name, function_name, image_paths, conversations=None, test_df=None, save=False):
+    def inference(args, model_name, function_name, image_paths, conversations=None, test_df=None, save=False, output_attention=False):
         print('args',args)
         if model_name == "stablevlm":
             model = StableVLMInference()
@@ -84,23 +85,34 @@ class Inferencer:
         elif model_name == "llavatour":
             model = LLaVAInference(args)
             checkpoint_path = args.model_path.split('/')[-1]
+        elif model_name == 'llavatour_retrieve':
+            model = LLaVARetrieveInfernce(args)
+            checkpoint_path = args.model_path.split('/')[-1]
         elif model_name == 'gpt3':
             model = GPT3()
         elif model_name == 'gpt4v':
             model = GPT4(model_name="gpt-4-vision-preview")
         elif model_name == 'gpt4o':
             model = GPT4(model_name='gpt-4o')
+        elif model_name == 'internvl':
+            model = InternVLInference(tensor_parallel_size=args.tensor_parallel_size)
 
         if function_name == "inference_spot_name" or function_name == "inference_spot_name_old":
             directory = '_'.join(function_name.split('_')[1:])
-            if model_name == 'llavatour':
-                if not os.path.exists(f"./result/{directory}/llavatour"): os.makedirs(f"./result/{directory}/llavatour")
-                save_path = f"./result/{directory}/llavatour/{checkpoint_path}.csv"
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/{directory}/{model_name}/"): os.makedirs(f"./result/{directory}/{model_name}/")
+                save_path = f"./result/{directory}/{model_name}/{checkpoint_path}.csv"
             else:
                 save_path = f"./result/{directory}/{model_name}.csv"
+
             print('save path', save_path)
             print(function_name)
             print(len(image_paths))
+            print('output attention', output_attention)
+            # result = model.process_images(
+            #     image_paths, ["この日本の観光地の名前を教えてください。ただし地名のみ答えて." for _ in range(len(image_paths))], japanese=True, task='spot_name', 
+            #     output_attention=output_attention
+            # )
             result = model.inference_spot_names(image_paths)
             #result = model.process_images(image_paths, prompts)
             if save:
@@ -109,9 +121,9 @@ class Inferencer:
                 )
         elif function_name == "inference_spot_name_topk":
             result = model.inference_spot_names_topk(image_paths)
-            if model_name == 'llavatour':
-                if not os.path.exists("./result/spot_name/llavatour/"):os.makedirs("./result/spot_name/llavatour/")
-                save_path = f"./result/spot_name/llavatour/{checkpoint_path}_topk.csv"
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/spot_name/{model_name}/"):os.makedirs(f"./result/spot_name/{model_name}/")
+                save_path = f"./result/spot_name/{model_name}/{checkpoint_path}_topk.csv"
             else:
                 save_path = f"./result/spot_name/{model_name}_topk.csv"
             if save:
@@ -122,9 +134,9 @@ class Inferencer:
         elif function_name == 'qa':
             if not os.path.exists('./result/qa'):
                 os.makedirs('./result/qa/', exist_ok=True)
-            if model_name == 'llavatour':
-                if not os.path.exists(f"./result/qa/llavatour/"):os.makedirs(f"./result/qa/llavatour/")
-                save_path = f"./result/qa/llavatour/{checkpoint_path}.csv"
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/qa/{model_name}/"):os.makedirs(f"./result/qa/{model_name}/")
+                save_path = f"./result/qa/{model_name}/{checkpoint_path}.csv"
             else:
                 save_path = f"./result/qa/{model_name}.csv"
             print('save path', save_path)
@@ -132,18 +144,18 @@ class Inferencer:
             # GPT3の場合入力160, 回答20トークンx10000で計180万トークン
             # 1000トークンあたり0.002ドルなので180万トークンで3.6ドル=576円
             if 'gpt' in model_name.lower():
-                prompts = [prompt + 'ただし, 30文字以内で簡潔に回答してください' for prompt in prompts]
-                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path)
+                prompts = [prompt + 'ただし, 10-20文字以内で一文で簡潔に回答してください' for prompt in prompts]
+                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path, task=function_name)
             else:
-                result = model.process_images(image_paths, prompts)
+                result = model.process_images(image_paths, prompts, task=function_name)
                 test_df['predicted'] = result
                 if save:
                     test_df.to_csv(save_path)
                 
         elif function_name == 'pvqa':
-            if model_name == 'llavatour':
-                if not os.path.exists(f"./result/pvqa/llavatour/"):os.makedirs(f"./result/pvqa/llavatour/")
-                save_path = f"./result/pvqa/llavatour/{checkpoint_path}.csv"
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/pvqa/{model_name}/"):os.makedirs(f"./result/pvqa/{model_name}/")
+                save_path = f"./result/pvqa/{model_name}/{checkpoint_path}.csv"
             else:
                 save_path = f"./result/pvqa/{model_name}.csv"
             print('save path', save_path)
@@ -155,8 +167,9 @@ class Inferencer:
             if 'gpt' in model_name.lower():
                 prompts = [prompt + 'ただし, 100文字程度で回答してください。 観光地の画像のコンテンツに関する説明をふまえ、2、3文で説明してください。' for prompt in prompts]
             if 'gpt' in model_name.lower():
-                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path)
+                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path, task=function_name)
             else:
+                result = model.process_images(image_paths, prompts, task=function_name)
                 test_df['predicted'] = result
                 if not os.path.exists('./result/pvqa'):
                     os.makedirs('./result/pvqa/', exist_ok=True)
@@ -164,14 +177,14 @@ class Inferencer:
                     test_df.to_csv(save_path)
                 
         elif function_name == 'ipp':
-            if model_name == 'llavatour':
-                if not os.path.exists(f"./result/ipp/llavatour/"):os.makedirs(f"./result/ipp/llavatour/")
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/ipp/{model_name}/"):os.makedirs(f"./result/ipp/{model_name}/")
                 save_path = f"./result/ipp/llavatour/{checkpoint_path}.csv"
             else:
                 save_path = f"./result/ipp/{model_name}.csv"
             print('save path', save_path)
             prompts = list(test_df['prompt'].values)
-            result = model.process_images(image_paths, prompts, debug_prompt=False)
+            result = model.process_images(image_paths, prompts, debug_prompt=False, task=function_name)
             test_df['predicted'] = result
             if not os.path.exists('./result/pvqa'):
                 os.makedirs('./result/pvqa/', exist_ok=True)
@@ -179,8 +192,8 @@ class Inferencer:
                 test_df.to_csv(save_path)
                 
         elif 'sequential' in function_name:
-            if model_name == 'llavatour':
-                if not os.path.exists(f"./result/sequential/llavatour/"):os.makedirs(f"./result/sequential/llavatour/")
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/sequential/{model_name}/"):os.makedirs(f"./result/sequential/{model_name}/")
                 if 'topk' in function_name:
                     save_path = f"./result/sequential/llavatour/{checkpoint_path}_topk.csv"
                 else:
@@ -196,7 +209,7 @@ class Inferencer:
             if 'topk' in function_name:
                 result = model.process_images(image_paths, prompts, task='sequential_topk')
             else:
-                result = model.process_images(image_paths, prompts,)
+                result = model.process_images(image_paths, prompts, task=function_name)
             test_df['predicted'] = result
             if not os.path.exists('./result/sequential'):
                 os.makedirs('./result/sequential/', exist_ok=True)
@@ -227,11 +240,16 @@ class Inferencer:
             result = model.inference_tag_count(image_paths, prompts)
             
         elif function_name == "generate_reviews":
-            if model_name == 'llavatour':
-                if not os.path.exists(f"./result/reviews/llavatour/"):os.makedirs(f"./result/reviews/llavatour/")
-                save_path = f"./result/reviews/llavatour/{checkpoint_path}"
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/reviews/{model_name}/"):os.makedirs(f"./result/reviews/{model_name}/")
+                if 'retrieve' in model_name:
+                    save_path = f"./result/reviews/{model_name}/{checkpoint_path}_{args.num_entity}_{args.num_relation}"
+                else:
+                    save_path = f"./result/reviews/{model_name}/{checkpoint_path}"
             else:
                 save_path = f"./result/reviews/{model_name}"
+                if args.retrieval:
+                    save_path = f"./result/reviews/{model_name}_retrieval_{args.retrieval_num}"
             print('save_path', save_path)
             if args.use_context:
                 prompts = []
@@ -240,8 +258,9 @@ class Inferencer:
                     age, tag, sex, spot = row['age'], row['tag'], row['sex'], row['spot']
                     if not pd.isna(age):context += f'{age}の'
                     #if not pd.isna(tag):context += f'{tag}の'
-                    if not pd.isna(sex):context += f'{sex}'
-                    prompt = f'あなたは{spot}を観光で訪れた{context}の観光客です。この画像について観光客のようにレビューを生成してください'
+                    if not pd.isna(sex):
+                        context += f'{sex}の'
+                    prompt = f'あなたは{spot}を観光で訪れた{context}観光客です。この画像について観光客のようにレビューを生成してください'
                     prompts.append(prompt)
             elif args.use_feature:
                 prompts = []
@@ -251,10 +270,20 @@ class Inferencer:
             else:
                 prompts = []
                 for i,row in test_df.iterrows():
-                    prompt = f"この観光地は{row['spot']}です。観光客になったつもりで画像にあったレビューを生成してください"
+                    #prompt = f"この観光地は{row['spot']}です。観光客になったつもりで画像にあったレビューを生成してください。"
+                    prompt = f"あなたは{row['spot']}を訪れた観光客です。与えられた写真についてレビューを書いてください"
+                    if args.aspect_cot:
+                        prompt+='ただし、段階的に行ってください。まず、レビューに含まれるアスペクトの列を予測してください。アスペクトは次の中のものを用いてください。[トピック,混雑度,景色,歴史,雰囲気,価格,サービス,アクセス,イベント,食事]。その次に、予測したアスペクト列に基づいてレビューを予測してください。'
+                    if 'llavatour' not in model_name:
+                        prompt+='ただし100文字程度で生成してください'
                     prompts.append(prompt)
-
-            result = model.process_images(image_paths, prompts)
+            print(' output attention', output_attention)
+            if 'gpt4' in model_name:
+                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path,  retrieval=args.retrieval, retrieve_num=args.retrieval_num)
+            elif 'retrieve' in model_name:
+                result = model.process_images(image_paths, prompts, output_attention=output_attention, task=function_name, num_entity=args.num_entity, num_relation=args.num_relation)
+            else:
+                result = model.process_images(image_paths, prompts, output_attention=output_attention, task=function_name, debug_prompt=True)
             #result = model.generate_reviews(image_paths, prompts)
 
             if save:
@@ -272,6 +301,116 @@ class Inferencer:
                         save_path + '.csv'
                     )
             print("result len:", len(result))
+
+        elif function_name == "generate_short_reviews":
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/short_reviews/{model_name}/"):os.makedirs(f"./result/reviews/{model_name}/")
+                if 'retrieve' in model_name:
+                    save_path = f"./result/short_reviews/{model_name}/{checkpoint_path}_{args.num_entity}_{args.num_relation}"
+                else:
+                    save_path = f"./result/short_reviews/{model_name}/{checkpoint_path}"
+            else:
+                save_path = f"./result/short_reviews/{model_name}"
+                if args.retrieval:
+                    save_path = f"./result/short_reviews/{model_name}_retrieval_{args.retrieval_num}"
+            print('save_path', save_path)
+
+            prompts = []
+            for i,row in test_df.iterrows():
+                #prompt = f"この観光地は{row['spot']}です。観光客になったつもりで画像にあったレビューを生成してください。"
+                prompt = f"あなたは{row['spot']}を訪れた観光客です。与えられた写真について簡潔にレビューを書いてください"
+                if 'llavatour' not in model_name:
+                    prompt+='ただし30文字程度で生成してください'
+                prompts.append(prompt)
+            print(' output attention', output_attention)
+            if 'gpt4' in model_name:
+                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path,  retrieval=args.retrieval, retrieve_num=args.retrieval_num)
+            elif 'retrieve' in model_name:
+                result = model.process_images(image_paths, prompts, output_attention=output_attention, task=function_name, num_entity=args.num_entity, num_relation=args.num_relation)
+            else:
+                result = model.process_images(image_paths, prompts, output_attention=output_attention, task=function_name, debug_prompt=True)
+            #result = model.generate_reviews(image_paths, prompts)
+
+            if save:
+                pd.DataFrame({"image_path": image_paths, "predicted": result, 'conversations': conversations}).to_csv(
+                    save_path + '.csv'
+                )
+            print("result len:", len(result))
+
+        elif function_name == 'generate_review_attribute':
+            if 'llavatour' in model_name:
+                if not os.path.exists(f"./result/reviews/{model_name}/"):os.makedirs(f"./result/reviews/{model_name}/")
+                if 'retrieve' in model_name:
+                    save_dir = f"./result/reviews/{model_name}/{checkpoint_path}_{args.num_entity}_{args.num_relation}"
+                else:
+                    save_dir = f"./result/reviews/{model_name}/{checkpoint_path}"
+            else:
+                save_dir = f"./result/reviews/{model_name}"
+                if args.retrieval:
+                    save_dir= f"./result/reviews/{model_name}_retrieval_{args.retrieval_num}"
+
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            prompts = []
+            fixed_value, attribute = args.fixed_value, args.attribute
+            for _, row in test_df.iterrows():
+                # 使用する属性の値を決定
+                gender = row['sex'] if attribute == 'sex' and fixed_value is None else fixed_value if attribute == 'sex' else None
+                age = row['age'] if attribute == 'age' and fixed_value is None else fixed_value if attribute == 'age' else None
+                tag = row['tag'] if attribute == 'tag' and fixed_value is None else fixed_value if attribute == 'tag' else None
+                season = row['season'] if attribute == 'season' and fixed_value is None else fixed_value if attribute == 'season' else None
+                month = row['month'] if attribute == 'month' and fixed_value is None else fixed_value if attribute == 'month' else None
+                profile_tag = row['profile_tag'] if attribute == 'profile_tag' and fixed_value is None else fixed_value if attribute == 'profile_tag' else None
+                profile_long = row['profile_long'] if attribute == 'profile_long' and fixed_value is None else fixed_value if attribute == 'profile_long' else None
+                length = row['length'] if attribute == 'length' and fixed_value is None else fixed_value if attribute == 'length' else None
+                rating = row['rating'] if attribute == 'rating' and fixed_value is None else fixed_value if attribute == 'rating' else None
+                posneg = row['feature'] if attribute == 'posneg' and fixed_value is None else fixed_value if attribute == 'posneg' else None
+                print(gender, age, tag, season, month, profile_tag, profile_long, length, rating, posneg)
+                # プロンプトを生成
+                if attribute=='posneg':
+                    prompt, _ = make_review_context_posneg_prompt(
+                        spot=row['spot'],
+                        tag=tag,
+                        gender=gender,
+                        age=age,
+                        month=month,
+                        season=season,
+                        rating=rating,
+                        prof_tag=profile_tag,
+                        prof_sent=profile_long,
+                        image_path=row['image_path'],
+                        review_length=length,
+                        matches=posneg
+                    )
+                else:
+                    prompt, _ = make_review_context_prompt(
+                        spot=row['spot'],
+                        tag=tag,
+                        gender=gender,
+                        age=age,
+                        month=month,
+                        season=season,
+                        rating=rating,
+                        prof_tag=profile_tag,
+                        prof_sent=profile_long,
+                        image_path=row['image_path'],
+                        review_length=length,
+                    )
+                if 'llavatour' not in model_name:
+                    prompt += 'ただし, 100文字程度で出力してください'
+                prompts.append(prompt)
+            print(test_df.head())
+            print('prompts', prompts[:10])
+            #result = model.process_images(image_paths, prompts, debug_prompt=True)
+            if 'gpt4' in model_name:
+                result = model.process_images(image_paths, prompts, test_df=test_df, save_path=save_path,  retrieval=args.retrieval, retrieve_num=args.retrieval_num)
+            elif 'retrieve' in model_name:
+                result = model.process_images(image_paths, prompts, output_attention=output_attention, num_entity=args.num_entity, num_relation=args.num_relation)
+            else:
+                result = model.process_images(image_paths, prompts, output_attention=output_attention, debug_prompt=True)
+            test_df['predicted'] = result
+            if save:
+                test_df.to_csv(os.path.join(save_dir, f'{attribute}_{fixed_value}_re.csv'))
             
         else:
             if not os.path.exists(f'./result/{function_name}'):
@@ -296,17 +435,18 @@ class Inferencer:
         del model
         return result
     
-    def generate_review_compare_context(self, args):
+    def generate_review_compare_context(self, args, ):
         model = LLaVAInference(args)
         df = pd.read_csv('./data/attribute_compare.csv')
+        attributes = ['20代', '40代', '60代']
         for image_path in df['image_path']:
-            image_paths = [image_path for _ in range(3)]
+            image_paths = [image_path for _ in range(len(attributes))]
             spot = image_path.split('_')[0]
-            prompts = [f'あなたは{spot}を訪れた男性の観光客です。写真からレビューを生成してください',
-                       f'あなたは{spot}を訪れた女性の観光客です。写真からレビューを生成してください',
-                       f'あなたは{spot}を訪れた家族の観光客です。写真からレビューを生成してください',]
+            prompts = [f'あなたは{spot}を訪れた{attribute}の観光客です。写真からレビューを生成してください'
+                       for attribute in attributes]
+            
             result = model.generate_reviews(image_paths, prompts)
-            pd.DataFrame({'image_path': image_paths, 'predicted': result, 'attribute': ['男性', '女性', '家族']}).to_csv('./result/reviews/llavatour_attribute_compare.csv', mode='a', header=False)
+            pd.DataFrame({'image_path': image_paths, 'predicted': result, 'attribute': attributes}).to_csv('./result/reviews/llavatour_attribute_compare_age.csv', mode='a', header=False)
             
             
     def spot_name_llavanext(self, args):
@@ -338,7 +478,7 @@ class Inferencer:
         #df = pd.read_csv('./result/spot_name_old/llava.csv')
         image_paths = df['image_path'].values
         result = Inferencer.inference(
-            args, args.model_name, "inference_spot_name", image_paths, save=True
+            args, args.model_name, "inference_spot_name", image_paths, save=True, output_attention=args.output_attention
         )
         return result
     
@@ -395,6 +535,23 @@ class Inferencer:
         conversations = [conversations[i] for i in inds_target]
         return image_paths, conversations
 
+    def inference_review_generation_attribute(self, args):
+        prompts = []
+        eval_df = pd.read_csv('./data/inference_review_attribute_all.csv')
+        image_paths = eval_df['image_path'].tolist()
+        conversations=eval_df['conversations'].values
+        result = Inferencer.inference(
+            args,
+            args.model_name,
+            "generate_review_attribute",
+            image_paths,
+            conversations=conversations,
+            test_df = eval_df,
+            save=True,
+            output_attention=args.output_attention
+        )
+        return result
+    
     def inference_review_generation(self, args):
         '''
         parameters:
@@ -413,10 +570,60 @@ class Inferencer:
             image_paths,
             conversations=conversations,
             test_df = eval_df,
-            save=True
+            save=True,
+            output_attention=args.output_attention
         )
+
         return result
     
+    def inference_short_review_generation(self, args):
+        '''
+        parameters:
+            args:
+                use_context: 属性情報(年齢・性別など)を使うかどうか
+                use_feature: featureを使うか
+        '''
+        #image_paths, conversations = self._prepare_image_paths_for_review_generation()
+        eval_df = pd.read_csv('./data/review_generation_eval.csv')
+        image_paths = eval_df['image_path'].values
+        conversations=eval_df['conversations'].values
+        result = Inferencer.inference(
+            args,
+            args.model_name,
+            "generate_short_reviews",
+            image_paths,
+            conversations=conversations,
+            test_df = eval_df,
+            save=True,
+            output_attention=args.output_attention
+        )
+
+        return result
+
+    def inference_review_kumamoto(self, args):
+        '''
+        parameters:
+            args:
+                use_context: 属性情報(年齢・性別など)を使うかどうか
+                use_feature: featureを使うか
+        '''
+        #image_paths, conversations = self._prepare_image_paths_for_review_generation()
+        eval_df = pd.read_csv('./data/df_review_kumamoto_eval.csv')
+        image_paths = eval_df['image_path'].values
+        conversations=eval_df['conversations'].values
+        result = Inferencer.inference(
+            args,
+            args.model_name,
+            "generate_reviews",
+            image_paths,
+            conversations=conversations,
+            test_df = eval_df,
+            save=True,
+            output_attention=args.output_attention
+        )
+
+        return result
+
     def inference_sequential(self, args):
         print('inference sequential')
         eval_df = pd.read_csv('./data/df_sequential_eval.csv')
@@ -429,7 +636,6 @@ class Inferencer:
                                        save=True)
         return result
     
-    
     def inference_sequential_topk(self, args):
         print('inference sequential')
         eval_df = pd.read_csv('./data/df_sequential_eval.csv')
@@ -441,6 +647,7 @@ class Inferencer:
                                        test_df=eval_df,
                                        save=True)
         return result
+
     
     def inference_ipp(self, args):
         ''''''
@@ -757,26 +964,46 @@ if __name__ == "__main__":
     #fire.Fire(Inferencer)
     #exit()
     parser = argparse.ArgumentParser()
-    parser.add_argument("-f", type=str, default="spot_name")
+    # 実行関数
+    parser.add_argument("-f", type=str, required=True, default="spot_name")
+    parser.add_argument("--function_name", type=str)
+    parser.add_argument("--df_path", type=str)
+
+    # モデル名
+    parser.add_argument("--model_name", type=str, required=True, default='llava')
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
     #parser.add_argument("--image-file", type=str, required=True)
+    # モデルロードパラメータ
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument('--tensor_parallel_size', type=int, default=1)
+    parser.add_argument("--load-8bit", action="store_true")
+    parser.add_argument("--load-4bit", action="store_true")
+    # モデル生成パラメータ
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-new-tokens", type=int, default=512)
-    parser.add_argument("--load-8bit", action="store_true")
-    parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--image-aspect-ratio", type=str, default='pad')
-    parser.add_argument("--model_name", type=str, default='llava')
     parser.add_argument("--tag", type=str, default='llava')
     parser.add_argument("--task_type", type=int, default=1)
     parser.add_argument("--prompt_type", type=int, default=1)
+
+    parser.add_argument('--output_attention', action='store_true')
+    # 属性条件付きレビュ-生成
     parser.add_argument("--use_context", action='store_true')
     parser.add_argument("--use_feature", action='store_true')
-    parser.add_argument("--function_name", type=str)
-    parser.add_argument("--df_path", type=str)
+    parser.add_argument("--aspect_cot", action='store_true')
+    # GPTなどでのレビュー生成におけるretrieval
+    parser.add_argument("--retrieval_num", type=int, default=1)
+    parser.add_argument('--retrieval', action='store_true')
+    # knowledge graphでの推論
+    parser.add_argument('--retrieve_method', type=str, default='triplet')
+    parser.add_argument('--num_entity', type=int, default=3)
+    parser.add_argument('--num_relation', type=int, default=3)
+    # 属性固定レビュー生成
+    parser.add_argument('--attribute', type=str, default='age')
+    parser.add_argument('--fixed_value', type=str, default=None)
     args = parser.parse_args()
     print()
     # inference = LLaVAInference(args)
@@ -789,6 +1016,10 @@ if __name__ == "__main__":
         inferencer.inference_func(args, args.df_path, args.function_name)
     elif args.f == 'review_generation':
         inferencer.inference_review_generation(args)
+    elif args.f == 'short_review_generation':
+        inferencer.inference_short_review_generation(args)
+    elif args.f == 'review_generation_attribute':
+        inferencer.inference_review_generation_attribute(args)
     elif args.f == 'eval_spot_name':
         inferencer.evaluate_spot_names()
     elif args.f == 'eval_review_generation':
@@ -801,6 +1032,8 @@ if __name__ == "__main__":
         inferencer.llavatour_inference_tag(args)
     elif args.f == 'inference_tag_counts':
         inferencer.inference_tag_counts(args)
+    elif args.f == 'inference_review_kumamoto':
+        inferencer.inference_review_kumamoto(args)
     elif args.f == 'llavatour_eval':
         inferencer.llavatour_eval(args)
     elif args.f == 'inference_pvqa':
@@ -819,8 +1052,6 @@ if __name__ == "__main__":
         inferencer.inference_spot_names_topk(args)
     elif args.f == 'inference_spot_names_all':
         inferencer.inference_spot_names_all(args)
-    elif args.f == 'inference_review_generation':
-        inferencer.inference_review_generation(args)
     elif args.f == 'inference_name_one':
         inferencer.inference_review_generation_all(args)
     elif args.f == 'llavatour_inference_and_eval':
